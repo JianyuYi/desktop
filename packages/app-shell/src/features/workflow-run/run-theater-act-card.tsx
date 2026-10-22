@@ -71,6 +71,8 @@ interface RunTheaterActCardProps {
   onConversationOpenChange?: (open: boolean) => void;
   /** Lets the workspace move an open session dock after interactive completion. */
   onNodeCompleted?: (nodeId: string) => void;
+  /** Direct successor titles shown by the parked step card in the session dock. */
+  nextNodeTitles?: string[];
 }
 
 /**
@@ -96,6 +98,7 @@ export function RunTheaterActCard({
   onConversationOpenChange,
   onNodeCompleted,
   showCompletedOutput = false,
+  nextNodeTitles = [],
 }: RunTheaterActCardProps) {
   const { i18n, t } = useTranslation();
   const locale =
@@ -130,12 +133,26 @@ export function RunTheaterActCard({
     isConversationOpen && state.sessionId != null
       ? { sessionId: state.sessionId }
       : null;
+  const interactive = data.agentConfig?.interactive === true;
+  // A parked interactive turn without a ready completion preview is paused: the previous turn
+  // did not settle normally, or an older node run has no snapshot yet.
+  const paused =
+    interactive &&
+    state.status === "awaiting_input" &&
+    state.completion?.ready !== true;
   const sessionInteraction =
     sessionChatIdentity !== null &&
-    data.agentConfig?.interactive === true &&
+    interactive &&
     runId !== undefined &&
     nodeId !== undefined
-      ? { runId, nodeId }
+      ? {
+          runId,
+          nodeId,
+          ...(state.completion !== undefined
+            ? { completion: state.completion }
+            : {}),
+          nextNodeTitles,
+        }
       : undefined;
   const hasHitl = interaction !== undefined;
   const retryWait =
@@ -268,14 +285,18 @@ export function RunTheaterActCard({
           <RunStatusBadge
             status={state.status}
             live={emphasized && isNodeWorking(state.status)}
+            {...(paused
+              ? { labelKey: "workflowRun.stepCard.pausedBadge" }
+              : {})}
           />
-          {state.stopReason != null && (
+          {state.stopReason === "loop_exit" && (
             <span className="text-[10px] text-muted-foreground">
-              {state.stopReason === "loop_exit"
-                ? t("workflowRun.loopExit.completed")
-                : state.stopReason === "loop_max_iterations"
-                  ? t("workflowRun.loopView.maxIterations")
-                  : state.stopReason}
+              {t("workflowRun.loopExit.completed")}
+            </span>
+          )}
+          {state.stopReason === "loop_max_iterations" && (
+            <span className="text-[10px] text-muted-foreground">
+              {t("workflowRun.loopView.maxIterations")}
             </span>
           )}
         </div>

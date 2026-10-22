@@ -116,11 +116,14 @@ export function RunStatusBadge({
   live = false,
   quiet = false,
   className,
+  labelKey,
 }: {
   status: Status;
   live?: boolean;
   quiet?: boolean;
   className?: string;
+  /** Overrides the status copy while keeping the tone, e.g. a paused parked turn. */
+  labelKey?: string;
 }) {
   const { t } = useTranslation();
   const tone = runStatusTone(status);
@@ -134,7 +137,7 @@ export function RunStatusBadge({
       )}
     >
       <RunStatusMark status={status} live={live} quiet={quiet} />
-      {t(tone.labelKey)}
+      {t(labelKey ?? tone.labelKey)}
     </Badge>
   );
 }

@@ -31,6 +31,8 @@ interface ParallelAct {
   data: WorkflowNodeData;
   state: GraphWorkflowNodeState;
   artifactCount: number;
+  /** Direct successor titles for this act's parked step card. */
+  nextNodeTitles?: string[];
   conversation: WorkflowNodeConversationItem[];
 }
 
@@ -359,6 +361,7 @@ export function RunTheaterParallelStage({
                       nodeId={act.nodeId}
                       live={live}
                       artifactCount={act.artifactCount}
+                      nextNodeTitles={act.nextNodeTitles}
                       conversation={act.conversation}
                       conversationEnabled={
                         act.nodeId === primaryId && act.data.kind === "agent"

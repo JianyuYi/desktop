@@ -1,0 +1,29 @@
+import type { GraphWorkflowRun } from "@ora/workflow-runtime";
+
+/**
+ * Direct successor titles for every node in one frozen graph, keyed by node id.
+ *
+ * The completion card names where an interactive step advances to. Titles follow edge order and
+ * are deduplicated; an empty list means the node is the last step, so the card must not claim a
+ * next step that does not exist.
+ */
+export function directSuccessorNodeTitles(
+  run: GraphWorkflowRun,
+): Record<string, string[]> {
+  const titleById = new Map(
+    run.definitionSnapshot.nodes.map((node) => [node.id, node.data.title]),
+  );
+  const nextByNodeId: Record<string, string[]> = {};
+  for (const edge of run.definitionSnapshot.edges) {
+    const target = titleById.get(edge.target);
+    if (target === undefined) {
+      continue;
+    }
+    const titles = nextByNodeId[edge.source] ?? [];
+    if (!titles.includes(target)) {
+      titles.push(target);
+    }
+    nextByNodeId[edge.source] = titles;
+  }
+  return nextByNodeId;
+}

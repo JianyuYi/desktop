@@ -369,6 +369,52 @@ export interface WorkflowNodeFileChange {
   deletions: number;
 }
 
+/** One declared reason a parked interactive turn cannot complete without an explicit force. */
+export type WorkflowNodeCompletionBlockerKind =
+  | "turn_stopped"
+  | "turn_truncated"
+  | "turn_refused"
+  | "turn_unknown"
+  | "structured_invalid"
+  | "output_missing";
+
+/** One completion blocker with implementation detail the UI may present as a hint. */
+export interface WorkflowNodeCompletionBlocker {
+  kind: WorkflowNodeCompletionBlockerKind;
+  /** Blocker-specific detail; absent when the backend has none, never used for control flow. */
+  params: Record<string, unknown>;
+}
+
+/** Identity of one settled turn: its user message and the `TurnEnded` that closed it. */
+export interface WorkflowNodeTurnKey {
+  userSeq: number;
+  endedSeq: number;
+}
+
+/**
+ * Read-only completion preview persisted as `payload.completion` on a parked interactive node.
+ *
+ * `ready` is derived from the raw snapshot (`blockers` empty and not `provisional`) so the same
+ * gate can drive the trailing step card and the right-bottom advancement action. Older node runs
+ * have no snapshot at all; consumers must treat that as unknown rather than ready.
+ */
+export interface WorkflowNodeCompletion {
+  /** The user message that opened the last turn; absent when no history was readable. */
+  userSeq?: number;
+  /** Absent when the turn has no `TurnEnded`, which always blocks completion. */
+  turnKey?: WorkflowNodeTurnKey;
+  /** Snake-case ACP stop reason of the settled turn; absent when it did not settle. */
+  stopReason?: string;
+  blockers: WorkflowNodeCompletionBlocker[];
+  warnings: string[];
+  /** SHA-256 of the final assistant text; absent when the turn did not settle. */
+  outputDigest?: string;
+  /** Cleanup timed out before the actor settled; `prepare` may still repair this snapshot. */
+  provisional: boolean;
+  /** No blockers and not provisional; the node can advance without an explicit force. */
+  ready: boolean;
+}
+
 /** Structured failure persisted on a node run as `payload.error_detail`. */
 export interface WorkflowNodeErrorDetail {
   kind: string;
@@ -487,6 +533,8 @@ export interface GraphWorkflowNodeState {
   failedAttempts?: WorkflowNodeAttemptFailure[];
   /** ACP stop reason recorded in `payload.stop_reason` when the node succeeded. */
   stopReason?: string;
+  /** Parked interactive completion gate from `payload.completion`; absent on older node runs. */
+  completion?: WorkflowNodeCompletion;
   /** What this step received when it started (kickoff, upstream, schema…). */
   input?: GraphWorkflowNodeIo;
   /** What this step produced when it finished (or HITL answer summary). */

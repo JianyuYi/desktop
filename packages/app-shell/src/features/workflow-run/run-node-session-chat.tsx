@@ -1,16 +1,34 @@
 import type * as acp from "@agentclientprotocol/sdk";
-import { IconPlayerSkipForward } from "@tabler/icons-react";
-import { useEffect, type ReactNode } from "react";
+import {
+  IconAlertTriangle,
+  IconCheck,
+  IconPlayerSkipForward,
+} from "@tabler/icons-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useStore } from "zustand";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  Badge,
   Button,
   Spinner,
   Tooltip,
   TooltipContent,
   TooltipTrigger,
+  cn,
 } from "@ora/ui";
-import type { GraphWorkflowNodeStatus } from "@ora/workflow-runtime";
+import type {
+  GraphWorkflowNodeStatus,
+  WorkflowNodeCompletion,
+  WorkflowNodeCompletionBlockerKind,
+} from "@ora/workflow-runtime";
 import { useChatStore } from "../../chat-store-context";
 import { useContractsClient } from "../../contracts-client-context";
 import { useCompleteWorkflowNode } from "../../state/data/workflow-runs";
@@ -24,12 +42,30 @@ const NODE_SESSION_CONVERSATION_NAVIGATION = {
   minAnchors: 2,
 } as const;
 
+/** Conservative preview for node runs that predate `payload.completion`; never ready. */
+const UNKNOWN_COMPLETION: WorkflowNodeCompletion = {
+  blockers: [{ kind: "turn_unknown", params: {} }],
+  warnings: [],
+  provisional: false,
+  ready: false,
+};
+
+/** Everything the step card needs from the owning workflow act. */
+interface RunNodeSessionInteraction {
+  runId: string;
+  nodeId: string;
+  /** Persisted completion preview of the parked turn; absent on older node runs. */
+  completion?: WorkflowNodeCompletion;
+  /** Direct successor titles; empty means this is the last step. */
+  nextNodeTitles?: string[];
+}
+
 interface RunNodeSessionChatProps {
   /** The real Ora session bound to this node. */
   sessionId: string;
   status: GraphWorkflowNodeStatus;
   /** Interactive nodes need these identifiers to expose their explicit completion action. */
-  interaction?: { runId: string; nodeId: string };
+  interaction?: RunNodeSessionInteraction;
   /** Actions placed at the right edge of the transcript's trailing slot. */
   sessionActions?: ReactNode;
   /** Reports a confirmed interactive completion so the workspace can follow the next node. */
@@ -67,6 +103,12 @@ export function RunNodeSessionChat({
   );
   const complete = useCompleteWorkflowNode();
   const interactive = interaction !== undefined;
+  /** Force completion stays behind an explicit confirmation because it can advance half a turn. */
+  const [forceOpen, setForceOpen] = useState(false);
+  const completion = interaction?.completion ?? UNKNOWN_COMPLETION;
+  // Old node runs have no snapshot; showing them as ready would let a click advance an
+  // unverified turn, so the card offers force instead (the backend materializes on prepare).
+  const completionReady = completion.ready === true;
 
   useEffect(() => {
     const existing = chatStore.getState().conversations[sessionId];
@@ -137,7 +179,8 @@ export function RunNodeSessionChat({
     interactive &&
     status === "awaiting_input" &&
     !isResponding &&
-    !complete.isPending;
+    !complete.isPending &&
+    completionReady;
 
   const handleSend = async (text: string, images?: acp.ImageContent[]) => {
     // The transcript keeps the `@role` chip while the agent reads the role's
@@ -167,6 +210,182 @@ export function RunNodeSessionChat({
     void client.session.cancelPrompt({ sessionId }).catch(() => {});
   };
 
+  /** Sends one human turn with a scoped instruction; the backend adds the step boundary. */
+  const handleContinue = async (ready: boolean) => {
+    const prompt = ready
+      ? t("workflowRun.stepCard.continueReadyPrompt")
+      : t("workflowRun.stepCard.continuePrompt", {
+          reason: completionReasonText(completion, t),
+        });
+    await handleSend(prompt);
+  };
+
+  /** Commits completion from the card or the right-bottom action; force must be confirmed. */
+  const handleComplete = (force: boolean) => {
+    if (interaction === undefined) {
+      return;
+    }
+    complete.mutate(
+      {
+        runId: interaction.runId,
+        nodeId: interaction.nodeId,
+        force,
+      },
+      {
+        onSuccess: () => onNodeCompleted?.(interaction.nodeId),
+      },
+    );
+  };
+
+  const stepCard = (() => {
+    if (!interactive || status !== "awaiting_input") {
+      return undefined;
+    }
+    const nextNodeTitles = interaction?.nextNodeTitles ?? [];
+    const nextNodeLabel = nextNodeTitles.join(
+      t("workflowRun.stepCard.nextSeparator"),
+    );
+    const blockedKindSet = new Set(
+      completion.blockers.map((blocker) => blocker.kind),
+    );
+    const blockedKinds = [...blockedKindSet];
+    const warningTexts = [...new Set(completion.warnings)].map((warning) =>
+      completionWarningText(warning, t),
+    );
+    const actionDisabled = isResponding || complete.isPending;
+    return (
+      <section
+        data-testid="node-step-card"
+        aria-label={t("workflowRun.stepCard.title")}
+        className="rounded-xl border border-border/80 bg-card px-3 py-2.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+            {t("workflowRun.stepCard.title")}
+          </p>
+          <Badge
+            variant="outline"
+            data-paused={completionReady ? undefined : ""}
+            className={cn(
+              "text-[10px]",
+              completionReady
+                ? "border-amber-500/35 bg-amber-500/10 text-amber-900 dark:text-amber-200"
+                : "border-border bg-muted/60 text-muted-foreground",
+            )}
+          >
+            {t(
+              completionReady
+                ? "workflowRun.stepCard.waitingBadge"
+                : "workflowRun.stepCard.pausedBadge",
+            )}
+          </Badge>
+        </div>
+        {completionReady ? (
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("workflowRun.stepCard.readyHint")}
+          </p>
+        ) : (
+          <>
+            <p className="mt-1.5 text-xs font-medium">
+              {t("workflowRun.stepCard.blockedTitle")}
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {blockedKinds.map((kind) => (
+                <li
+                  key={kind}
+                  className="flex items-start gap-1.5 text-xs text-muted-foreground"
+                >
+                  <IconAlertTriangle
+                    className="mt-0.5 size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                    aria-hidden="true"
+                  />
+                  <span>{t(completionBlockerReasonKey(kind))}</span>
+                </li>
+              ))}
+            </ul>
+            {completion.provisional && (
+              <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+                {t("workflowRun.stepCard.provisional")}
+              </p>
+            )}
+            <p className="mt-1.5 text-[11px] text-muted-foreground/80">
+              {t("workflowRun.stepCard.blockedHint")}
+            </p>
+          </>
+        )}
+        {warningTexts.length > 0 && (
+          <ul className="mt-1.5 space-y-0.5">
+            {warningTexts.map((warning) => (
+              <li
+                key={warning}
+                className="text-[11px] text-muted-foreground/80"
+              >
+                {warning}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          {completionReady ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="complete-ready-node"
+                disabled={actionDisabled}
+                aria-busy={complete.isPending}
+                onClick={() => handleComplete(false)}
+              >
+                {complete.isPending ? (
+                  <Spinner className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <IconCheck className="size-3.5" aria-hidden="true" />
+                )}
+                {nextNodeTitles.length > 0
+                  ? t("workflowRun.stepCard.readyAction", {
+                      next: nextNodeLabel,
+                    })
+                  : t("workflowRun.stepCard.readyLastAction")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="continue-chat"
+                disabled={actionDisabled}
+                onClick={() => void handleContinue(true)}
+              >
+                {t("workflowRun.stepCard.continueChat")}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="continue-current-step"
+                disabled={actionDisabled}
+                onClick={() => void handleContinue(false)}
+              >
+                {t("workflowRun.stepCard.continueStep")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="force-complete-node"
+                disabled={actionDisabled}
+                onClick={() => setForceOpen(true)}
+              >
+                {t("workflowRun.stepCard.forceAction")}
+              </Button>
+            </>
+          )}
+        </div>
+      </section>
+    );
+  })();
+
   return (
     <div className="flex h-full min-h-0 flex-1 overflow-hidden rounded-xl border border-border/70 bg-background">
       <ChatView
@@ -192,6 +411,7 @@ export function RunNodeSessionChat({
         modelSelectorDisabled
         modelSelectorSessionId={sessionId}
         composerVisible={interactive}
+        trailing={stepCard}
         composerActions={
           active || sessionActions != null ? (
             <>
@@ -208,12 +428,7 @@ export function RunNodeSessionChat({
                       title={t("workflowRun.completeNode.action")}
                       aria-busy={complete.isPending}
                       disabled={!completeEnabled}
-                      onClick={() =>
-                        complete.mutate(interaction, {
-                          onSuccess: () =>
-                            onNodeCompleted?.(interaction.nodeId),
-                        })
-                      }
+                      onClick={() => handleComplete(false)}
                     >
                       {complete.isPending ? (
                         <Spinner className="size-4" aria-hidden="true" />
@@ -224,7 +439,9 @@ export function RunNodeSessionChat({
                   </TooltipTrigger>
                   {!completeEnabled && (
                     <TooltipContent sideOffset={8}>
-                      {t("workflowRun.completeNode.disabledHint")}
+                      {completionReady
+                        ? t("workflowRun.completeNode.disabledHint")
+                        : t("workflowRun.completeNode.blockedHint")}
                     </TooltipContent>
                   )}
                 </Tooltip>
@@ -242,6 +459,76 @@ export function RunNodeSessionChat({
             .catch(() => undefined);
         }}
       />
+      {interactive && (
+        <AlertDialog open={forceOpen} onOpenChange={setForceOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {t("workflowRun.stepCard.forceTitle")}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {t("workflowRun.stepCard.forceDescription")}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={complete.isPending}>
+                {t("common.cancel")}
+              </AlertDialogCancel>
+              <AlertDialogAction
+                data-testid="confirm-force-complete"
+                variant="destructive"
+                disabled={complete.isPending}
+                onClick={() => {
+                  setForceOpen(false);
+                  handleComplete(true);
+                }}
+              >
+                {t("workflowRun.stepCard.forceConfirm")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </div>
   );
+}
+
+/** Stable translation key for one completion blocker; unknown kinds stay conservatively blocking. */
+function completionBlockerReasonKey(
+  kind: WorkflowNodeCompletionBlockerKind,
+): string {
+  return `workflowRun.stepCard.blocker.${kind}`;
+}
+
+/** Maps known non-blocking warning codes; unknown backend details stay visible as data. */
+function completionWarningText(
+  warning: string,
+  translate: (key: string) => string,
+): string {
+  if (warning === "empty_output") {
+    return translate("workflowRun.stepCard.warning.empty_output");
+  }
+  if (warning === "history_unavailable") {
+    return translate("workflowRun.stepCard.warning.history_unavailable");
+  }
+  if (warning.startsWith("history_integrity_gap")) {
+    return translate("workflowRun.stepCard.warning.history_integrity_gap");
+  }
+  return warning;
+}
+
+/** Human-readable reason list used inside the scoped continue instruction. */
+function completionReasonText(
+  completion: WorkflowNodeCompletion,
+  translate: (key: string) => string,
+): string {
+  const kinds = [
+    ...new Set(completion.blockers.map((blocker) => blocker.kind)),
+  ];
+  if (kinds.length === 0) {
+    return translate("workflowRun.stepCard.blocker.turn_unknown");
+  }
+  return kinds
+    .map((kind) => translate(completionBlockerReasonKey(kind)))
+    .join(" ");
 }

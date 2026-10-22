@@ -440,6 +440,40 @@ describe("RunTheaterActCard conversation", () => {
     expect(onToggleInspector).toHaveBeenCalledTimes(2);
   });
 
+  it("labels a parked interactive turn as paused without printing the raw stop reason", () => {
+    render(
+      <RunTheaterActCard
+        data={{
+          ...NODE_DATA,
+          agentConfig: {
+            schemaVersion: 3,
+            executor: { agentCli: AGENT_REF.opencode, modelId: "mock-model" },
+            roleId: "reviewer",
+            skills: [],
+            mcps: [],
+            prompt: "Review the current branch.",
+            interactive: true,
+          },
+        }}
+        state={{
+          status: "awaiting_input",
+          stopReason: "cancelled",
+          completion: {
+            blockers: [{ kind: "turn_stopped", params: {} }],
+            warnings: [],
+            provisional: false,
+            ready: false,
+          },
+        }}
+        live
+      />,
+      { wrapper: createSessionWrapper() },
+    );
+
+    expect(screen.getByText("已暂停")).toBeInTheDocument();
+    expect(screen.queryByText("cancelled")).toBeNull();
+  });
+
   it("keeps the session dock available while HITL interaction owns the footer", async () => {
     const user = userEvent.setup();
     render(

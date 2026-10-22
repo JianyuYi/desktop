@@ -51,6 +51,12 @@ export const workflowRunTranslations = {
     "errors.workflow_node_not_found": "未找到该工作流节点。",
     "errors.workflow_node_not_awaiting_input":
       "该节点当前不在等待人工输入，无法完成。",
+    "errors.workflow_node_incomplete":
+      "本轮尚未完成，不能直接完成当前节点；请继续当前步骤或显式强制完成。",
+    "errors.workflow_node_turn_changed":
+      "本轮对话已变化，请刷新运行后重新确认。",
+    "errors.workflow_node_output_changed":
+      "本轮产出已变化，请刷新运行后重新确认。",
     "errors.workflow_node_not_diagnosable":
       "只有失败的智能体节点才能做 AI 分析。",
     "workflowRun.loading": "正在加载运行…",
@@ -257,6 +263,46 @@ export const workflowRunTranslations = {
     "workflowRun.completeNode.action": "完成当前节点",
     "workflowRun.completeNode.disabledHint":
       "请等待节点回复完成后再完成当前节点。",
+    "workflowRun.completeNode.blockedHint":
+      "本轮没有正常结束，请在步骤卡片里继续当前步骤或仍然完成。",
+    "workflowRun.stepCard.title": "当前步骤",
+    "workflowRun.stepCard.readyHint": "本轮已正常结束，可以完成当前步骤。",
+    "workflowRun.stepCard.readyAction": "完成并进入下一步：{{next}}",
+    "workflowRun.stepCard.readyLastAction": "完成当前步骤",
+    "workflowRun.stepCard.continueChat": "继续对话",
+    "workflowRun.stepCard.blockedTitle": "本轮未完成",
+    "workflowRun.stepCard.blockedHint":
+      "需要继续当前步骤，或显式采用当前产出。",
+    "workflowRun.stepCard.continueStep": "继续当前步骤",
+    "workflowRun.stepCard.forceAction": "仍然完成（采用当前产出）",
+    "workflowRun.stepCard.forceTitle": "仍然完成当前步骤？",
+    "workflowRun.stepCard.forceDescription":
+      "本轮没有正常结束，当前产出可能不完整。完成后工作流会进入下一步，并记录这次强制完成。",
+    "workflowRun.stepCard.forceConfirm": "仍然完成",
+    "workflowRun.stepCard.pausedBadge": "已暂停",
+    "workflowRun.stepCard.waitingBadge": "等待参与",
+    "workflowRun.stepCard.provisional": "本轮仍在收尾，结果确认后会自动刷新。",
+    "workflowRun.stepCard.warning.empty_output":
+      "本轮没有文本输出；该节点未声明输出契约，仍可完成。",
+    "workflowRun.stepCard.warning.history_integrity_gap":
+      "会话历史存在缺口，本轮结果可能不完整。",
+    "workflowRun.stepCard.warning.history_unavailable":
+      "无法读取会话历史，本轮结果未知。",
+    "workflowRun.stepCard.nextSeparator": "、",
+    "workflowRun.stepCard.continuePrompt":
+      "请继续当前步骤。上一轮未正常结束：{{reason}}只完成本步骤，不要执行后续节点；完成后请告诉我结果，我会在工作流界面确认完成。",
+    "workflowRun.stepCard.continueReadyPrompt":
+      "请继续对话，暂时不要结束当前步骤。我需要补充信息后，再在工作流界面完成这一步。",
+    "workflowRun.stepCard.blocker.turn_stopped": "已停止：本轮生成被中断。",
+    "workflowRun.stepCard.blocker.turn_truncated": "被截断：本轮达到输出上限。",
+    "workflowRun.stepCard.blocker.turn_refused":
+      "拒答：智能体没有完成本轮请求。",
+    "workflowRun.stepCard.blocker.turn_unknown":
+      "回合未知：没有找到本轮正常结束的记录。",
+    "workflowRun.stepCard.blocker.structured_invalid":
+      "结构化输出不符合：本轮输出未通过声明的结构校验。",
+    "workflowRun.stepCard.blocker.output_missing":
+      "没有输出：本轮没有产生声明的输出。",
     "workflowRun.hitl.panelLabel": "需要你的参与",
     "workflowRun.hitl.title": "确认本步理解",
     "workflowRun.hitl.hint": "填写后提交，工作流才会继续。",
@@ -468,6 +514,12 @@ export const workflowRunTranslations = {
     "errors.workflow_node_not_found": "Workflow node not found.",
     "errors.workflow_node_not_awaiting_input":
       "This node is not awaiting input and cannot be completed.",
+    "errors.workflow_node_incomplete":
+      "This turn is incomplete. Continue it or complete it with an explicit force.",
+    "errors.workflow_node_turn_changed":
+      "The current turn changed. Refresh the run and try again.",
+    "errors.workflow_node_output_changed":
+      "This turn's output changed. Refresh the run and try again.",
     "errors.workflow_node_not_diagnosable":
       "AI analysis is only available for a failed agent node.",
     "workflowRun.loading": "Loading run…",
@@ -689,6 +741,50 @@ export const workflowRunTranslations = {
     "workflowRun.completeNode.action": "Complete current node",
     "workflowRun.completeNode.disabledHint":
       "Wait for the node to finish replying before completing it.",
+    "workflowRun.completeNode.blockedHint":
+      "This turn did not end normally. Continue it or complete it anyway from the step card.",
+    "workflowRun.stepCard.title": "Current step",
+    "workflowRun.stepCard.readyHint":
+      "This turn ended normally. You can complete it.",
+    "workflowRun.stepCard.readyAction": "Complete and continue to: {{next}}",
+    "workflowRun.stepCard.readyLastAction": "Complete current step",
+    "workflowRun.stepCard.continueChat": "Continue chatting",
+    "workflowRun.stepCard.blockedTitle": "This turn is not complete",
+    "workflowRun.stepCard.blockedHint":
+      "Continue this step, or explicitly accept the current output.",
+    "workflowRun.stepCard.continueStep": "Continue this step",
+    "workflowRun.stepCard.forceAction": "Complete anyway (use current output)",
+    "workflowRun.stepCard.forceTitle": "Complete this step anyway?",
+    "workflowRun.stepCard.forceDescription":
+      "This turn did not end normally and its output may be incomplete. Completing it advances the workflow and records the forced completion.",
+    "workflowRun.stepCard.forceConfirm": "Complete anyway",
+    "workflowRun.stepCard.pausedBadge": "Paused",
+    "workflowRun.stepCard.waitingBadge": "Awaiting input",
+    "workflowRun.stepCard.provisional":
+      "This turn is still settling; the card refreshes once it is confirmed.",
+    "workflowRun.stepCard.warning.empty_output":
+      "This turn had no text output; the node declares no output contract, so it can still complete.",
+    "workflowRun.stepCard.warning.history_integrity_gap":
+      "The session history has a gap; this turn's result may be incomplete.",
+    "workflowRun.stepCard.warning.history_unavailable":
+      "The session history could not be read; this turn's result is unknown.",
+    "workflowRun.stepCard.nextSeparator": ", ",
+    "workflowRun.stepCard.continuePrompt":
+      "Please continue the current step. The previous turn did not end normally: {{reason}} Only complete this step, do not run the next nodes; tell me the result and I will confirm completion in the workflow view.",
+    "workflowRun.stepCard.continueReadyPrompt":
+      "Please continue the conversation for now and do not finish this step. I will confirm completion in the workflow view after adding what is needed.",
+    "workflowRun.stepCard.blocker.turn_stopped":
+      "Stopped: generation was interrupted.",
+    "workflowRun.stepCard.blocker.turn_truncated":
+      "Truncated: the turn hit its output limit.",
+    "workflowRun.stepCard.blocker.turn_refused":
+      "Refused: the agent declined the requested work.",
+    "workflowRun.stepCard.blocker.turn_unknown":
+      "Turn unknown: no normally ended turn was found.",
+    "workflowRun.stepCard.blocker.structured_invalid":
+      "Structured output invalid: this turn did not match the declared schema.",
+    "workflowRun.stepCard.blocker.output_missing":
+      "No output: this turn produced none of the declared output.",
     "workflowRun.hitl.panelLabel": "Your input is required",
     "workflowRun.hitl.title": "Confirm this step",
     "workflowRun.hitl.hint": "Submit to continue the workflow.",
