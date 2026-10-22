@@ -117,11 +117,27 @@ to non-interactive and the runtime rejects interactive members.
 Each parked turn persists a completion snapshot: its turn key, stop reason, blockers and the final
 assistant-text digest. Only an `EndTurn` turn without blockers completes normally. A stopped,
 truncated, refused or unknown turn keeps the node awaiting input, and `completeWorkflowNode` rejects
-it with `workflow_node_incomplete` unless `force` is requested; a changed turn or output digest
-returns `workflow_node_turn_changed` or `workflow_node_output_changed`. The step card at the end of
-the conversation is the only advance action, offering continue or a confirmed forced completion. A
-turn whose stream dropped before its stop reason became durable parks provisionally, and a later
-completion attempt repairs the snapshot once the turn settles.
+it with `workflow_node_incomplete` (carrying every blocker) unless `force` is requested; a changed
+turn or output digest returns `workflow_node_turn_changed` or `workflow_node_output_changed`, naming
+the expected and actual identity. The step card at the end of the conversation is the only advance
+action, offering continue or a confirmed forced completion.
+
+A turn whose stream dropped before its stop reason became durable parks provisionally from the last
+readable history: the snapshot keeps the `userSeq` it describes and a `turn_not_settled` warning, and
+a later completion attempt repairs it once the turn settles for that same user message. A node that
+parked before completion snapshots existed has no snapshot at all; the first completion attempt
+materializes one from the session history and applies the same blockers gate, so an unfinished turn
+is refused there too rather than advancing silently.
+
+Every human turn carries a `<workflow_step_boundary>` block rendered from the frozen graph. It names
+the current step and its direct successors, and states that only this step is in scope. It records no
+promise about the runtime stopping later nodes, and the prompt recorded for the user stays exactly
+what the user typed.
+
+A `force` completion is audited in the node payload under `completion_forced`, with the blockers that
+were bypassed, whether the node had a settled turn, and where the accepted output came from
+(`turn_window` or `last_assistant_message`). The audit is written in the same transaction as the
+completion, so a completed node never lacks its record.
 
 ## Variables and types
 
