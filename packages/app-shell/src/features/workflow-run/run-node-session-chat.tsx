@@ -31,6 +31,7 @@ import type {
 } from "@ora/workflow-runtime";
 import { useChatStore } from "../../chat-store-context";
 import { useContractsClient } from "../../contracts-client-context";
+import { useContractErrorToast } from "../../i18n/use-contract-error-toast";
 import { useCompleteWorkflowNode } from "../../state/data/workflow-runs";
 import { useAgents } from "../../state/hooks/use-agents";
 import { ChatView } from "../chat/chat-view";
@@ -102,13 +103,19 @@ export function RunNodeSessionChat({
     (state) => state.conversations[sessionId],
   );
   const complete = useCompleteWorkflowNode();
+  const showContractError = useContractErrorToast();
   const interactive = interaction !== undefined;
   /** Force completion stays behind an explicit confirmation because it can advance half a turn. */
   const [forceOpen, setForceOpen] = useState(false);
   const completion = interaction?.completion ?? UNKNOWN_COMPLETION;
-  // Old node runs have no snapshot; showing them as ready would let a click advance an
-  // unverified turn, so the card offers force instead (the backend materializes on prepare).
-  const completionReady = completion.ready === true;
+  // A node parked before completion snapshots existed has no preview to gate on. It keeps the
+  // ordinary completion entry: the backend materializes the snapshot from the session history and
+  // applies the same blockers gate, returning `workflow_node_incomplete` when the turn is not
+  // finished. Guessing readiness here would either block a valid completion or hide the check.
+  const hasCompletionSnapshot = interaction?.completion !== undefined;
+  const completionReady = hasCompletionSnapshot && completion.ready === true;
+  /** The card can still offer a normal completion while the snapshot is unknown. */
+  const completionActionable = completionReady || !hasCompletionSnapshot;
 
   useEffect(() => {
     const existing = chatStore.getState().conversations[sessionId];
@@ -180,7 +187,7 @@ export function RunNodeSessionChat({
     status === "awaiting_input" &&
     !isResponding &&
     !complete.isPending &&
-    completionReady;
+    completionActionable;
 
   const handleSend = async (text: string, images?: acp.ImageContent[]) => {
     // The transcript keeps the `@role` chip while the agent reads the role's
@@ -233,6 +240,11 @@ export function RunNodeSessionChat({
       },
       {
         onSuccess: () => onNodeCompleted?.(interaction.nodeId),
+        // A rejected completion is a user-visible outcome, not a refresh: a stale turn or a
+        // changed output must say so instead of silently leaving the card unchanged.
+        onError: (error) => {
+          showContractError(error);
+        },
       },
     );
   };
@@ -284,7 +296,7 @@ export function RunNodeSessionChat({
           <p className="mt-1.5 text-xs text-muted-foreground">
             {t("workflowRun.stepCard.readyHint")}
           </p>
-        ) : (
+        ) : hasCompletionSnapshot ? (
           <>
             <p className="mt-1.5 text-xs font-medium">
               {t("workflowRun.stepCard.blockedTitle")}
@@ -310,6 +322,15 @@ export function RunNodeSessionChat({
             )}
             <p className="mt-1.5 text-[11px] text-muted-foreground/80">
               {t("workflowRun.stepCard.blockedHint")}
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="mt-1.5 text-xs font-medium">
+              {t("workflowRun.stepCard.legacyTitle")}
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground/80">
+              {t("workflowRun.stepCard.legacyHint")}
             </p>
           </>
         )}
@@ -358,11 +379,49 @@ export function RunNodeSessionChat({
                 {t("workflowRun.stepCard.continueChat")}
               </Button>
             </>
+          ) : hasCompletionSnapshot ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="continue-current-step"
+                disabled={actionDisabled}
+                onClick={() => void handleContinue(false)}
+              >
+                {t("workflowRun.stepCard.continueStep")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="force-complete-node"
+                disabled={actionDisabled}
+                onClick={() => setForceOpen(true)}
+              >
+                {t("workflowRun.stepCard.forceAction")}
+              </Button>
+            </>
           ) : (
             <>
               <Button
                 type="button"
                 size="sm"
+                data-testid="complete-legacy-node"
+                disabled={actionDisabled}
+                aria-busy={complete.isPending}
+                onClick={() => handleComplete(false)}
+              >
+                {complete.isPending ? (
+                  <Spinner className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <IconCheck className="size-3.5" aria-hidden="true" />
+                )}
+                {t("workflowRun.stepCard.legacyAction")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
                 data-testid="continue-current-step"
                 disabled={actionDisabled}
                 onClick={() => void handleContinue(false)}
@@ -510,6 +569,9 @@ function completionWarningText(
   }
   if (warning === "history_unavailable") {
     return translate("workflowRun.stepCard.warning.history_unavailable");
+  }
+  if (warning === "turn_not_settled") {
+    return translate("workflowRun.stepCard.warning.turn_not_settled");
   }
   if (warning.startsWith("history_integrity_gap")) {
     return translate("workflowRun.stepCard.warning.history_integrity_gap");

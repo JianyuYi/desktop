@@ -288,11 +288,17 @@ export const workflowRunTranslations = {
       "会话历史存在缺口，本轮结果可能不完整。",
     "workflowRun.stepCard.warning.history_unavailable":
       "无法读取会话历史，本轮结果未知。",
+    "workflowRun.stepCard.warning.turn_not_settled":
+      "本轮还没有在等待窗口内收敛；节点可能仍在收尾，稍后刷新会重新判定。",
     "workflowRun.stepCard.nextSeparator": "、",
     "workflowRun.stepCard.continuePrompt":
-      "请继续当前步骤。上一轮未正常结束：{{reason}}只完成本步骤，不要执行后续节点；完成后请告诉我结果，我会在工作流界面确认完成。",
+      "请继续当前步骤。上一轮没有正常结束——{{reason}}\n只完成本步骤，不要执行后续节点；完成后请告诉我结果，我会在工作流界面确认完成。",
     "workflowRun.stepCard.continueReadyPrompt":
       "请继续对话，暂时不要结束当前步骤。我需要补充信息后，再在工作流界面完成这一步。",
+    "workflowRun.stepCard.legacyTitle": "本步骤还没有完成快照",
+    "workflowRun.stepCard.legacyHint":
+      "升级前停靠的节点没有记录本轮状态。完成后端会先读取会话历史再判定：本轮未正常结束时返回原因，需要继续或显式强制完成。",
+    "workflowRun.stepCard.legacyAction": "完成当前步骤",
     "workflowRun.stepCard.blocker.turn_stopped": "已停止：本轮生成被中断。",
     "workflowRun.stepCard.blocker.turn_truncated": "被截断：本轮达到输出上限。",
     "workflowRun.stepCard.blocker.turn_refused":
@@ -768,11 +774,17 @@ export const workflowRunTranslations = {
       "The session history has a gap; this turn's result may be incomplete.",
     "workflowRun.stepCard.warning.history_unavailable":
       "The session history could not be read; this turn's result is unknown.",
+    "workflowRun.stepCard.warning.turn_not_settled":
+      "This turn has not settled inside the wait window; the node may still be finishing and the card rechecks on refresh.",
     "workflowRun.stepCard.nextSeparator": ", ",
     "workflowRun.stepCard.continuePrompt":
-      "Please continue the current step. The previous turn did not end normally: {{reason}} Only complete this step, do not run the next nodes; tell me the result and I will confirm completion in the workflow view.",
+      "Please continue the current step. The previous turn did not end normally — {{reason}}\nOnly complete this step, do not run the next nodes; tell me the result and I will confirm completion in the workflow view.",
     "workflowRun.stepCard.continueReadyPrompt":
       "Please continue the conversation for now and do not finish this step. I will confirm completion in the workflow view after adding what is needed.",
+    "workflowRun.stepCard.legacyTitle": "This step has no completion snapshot",
+    "workflowRun.stepCard.legacyHint":
+      "A node parked before snapshots existed recorded nothing about its turn. Completing reads the session history and applies the same gate: an unfinished turn comes back with its reason unless you force the completion.",
+    "workflowRun.stepCard.legacyAction": "Complete current step",
     "workflowRun.stepCard.blocker.turn_stopped":
       "Stopped: generation was interrupted.",
     "workflowRun.stepCard.blocker.turn_truncated":

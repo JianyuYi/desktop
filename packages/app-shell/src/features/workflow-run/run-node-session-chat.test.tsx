@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { ChatTurn, SessionConversation } from "@ora/chat";
 import { createChatStore } from "@ora/chat";
+import { RemoteContractError } from "@ora/contracts";
+import { toast } from "@ora/ui";
 import type {
   GraphWorkflowNodeStatus,
   WorkflowNodeCompletion,
@@ -683,6 +685,63 @@ describe("RunNodeSessionChat", () => {
     const action = screen.getByTestId("complete-ready-node");
     expect(action).toHaveTextContent("完成当前步骤");
     expect(action).not.toHaveTextContent("下一步");
+  });
+
+  it("keeps the ordinary completion entry for a node parked without a snapshot", async () => {
+    const { client } = renderDock("awaiting_input", false, []);
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
+
+    const card = screen.getByTestId("node-step-card");
+    expect(card).toHaveTextContent("本步骤还没有完成快照");
+    expect(within(card).getByText("已暂停")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("complete-legacy-node"));
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
+    );
+    expect(screen.getByTestId("force-complete-node")).toBeInTheDocument();
+  });
+
+  it("reports a rejected completion instead of failing silently", async () => {
+    const errorToast = vi.spyOn(toast, "error").mockImplementation(() => "id");
+    const { handlers } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+    );
+    handlers.completeWorkflowNode = async () => {
+      throw new RemoteContractError(
+        {
+          code: "workflow_node_turn_changed",
+          params: {
+            nodeId,
+            expected: { userSeq: 1, endedSeq: 2 },
+            actual: { userSeq: 3, endedSeq: 4 },
+          },
+          requestId: "550e8400-e29b-41d4-a716-446655440000",
+        },
+        null,
+      );
+    };
+
+    await userEvent.click(screen.getByTestId("complete-ready-node"));
+
+    await waitFor(() =>
+      expect(errorToast).toHaveBeenCalledWith(
+        "本轮对话已变化，请刷新运行后重新确认。",
+        { description: undefined, action: undefined },
+      ),
+    );
+    errorToast.mockRestore();
   });
 
   it.each([
