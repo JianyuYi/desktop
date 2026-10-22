@@ -213,6 +213,26 @@ pub(crate) fn prepare_completion(
         }
         None => (None, unknown_completion_snapshot(false)),
     };
+    let stored = match stored {
+        // A provisional snapshot written before the actor settled is repaired once `prepare`
+        // observes the settled turn; the write is payload-only and keeps the node Pending.
+        Some(stored) if stored.provisional && derived.turn_key.is_some() => {
+            let patch = completion_payload(&derived);
+            if let Err(error) = repository.merge_node_payload(
+                &node_run.id,
+                &patch,
+                crate::clock::SystemClock.now_timestamp_millis(),
+            ) {
+                ora_warn!(
+                    node_run_id = %node_run.id,
+                    error = %error,
+                    "failed to repair a provisional completion snapshot"
+                );
+            }
+            Some(derived.clone())
+        }
+        other => other,
+    };
     if let Some(stored) = &stored {
         if stored.turn_key.is_some() && stored.turn_key != derived.turn_key {
             return Err(completion_rejected(PublicError::WorkflowNodeTurnChanged(
