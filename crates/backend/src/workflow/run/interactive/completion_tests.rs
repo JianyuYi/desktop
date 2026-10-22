@@ -12,7 +12,7 @@ use crate::workflow::run::test_fixture::{
     INTERACTIVE_AGENT_GRAPH, bind_and_park, bootstrap, end_fixture_turn, run_test, started_run,
     write_open_turn, write_settled_turn,
 };
-use ora_application::WorkflowRunRepository;
+use ora_application::{WorkflowRunEngineRepository, WorkflowRunRepository};
 use ora_contracts::{
     PublicError, WorkflowNodeCompletionBlocker, WorkflowNodeCompletionBlockerKind,
     WorkflowNodeTurnKey,
@@ -176,6 +176,34 @@ fn blocked_turn_returns_every_blocker_with_its_detail() {
                     },
                 ],
             })
+        );
+    });
+}
+
+/// The node state is checked before any snapshot comparison, so a terminal node never reports a
+/// conflict or a blocker it can no longer act on.
+#[test]
+fn a_node_that_left_the_awaiting_state_is_rejected_before_its_snapshot() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "partial");
+        store_snapshot(&pool, &node_run_id, &stopped_snapshot());
+        SqliteWorkflowRunEngineRepository::new(pool.clone())
+            .transition_node_run_status(
+                &node_run_id,
+                ora_domain::WorkflowNodeStatus::Pending,
+                ora_domain::WorkflowNodeStatus::Cancelled,
+                70,
+            )
+            .expect("the node leaves the awaiting state");
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", true)
+            .expect_err("a terminal node cannot be completed, even with force");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeNotAwaitingInput(ora_contracts::EmptyErrorParams {})
         );
     });
 }
