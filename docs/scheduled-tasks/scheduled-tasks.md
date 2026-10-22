@@ -12,11 +12,12 @@ verdict columns (migration `0020`) and the artifact manifest tables (migration `
 
 ## What is delivered
 
-The definition use cases and history reads are wired into Desktop. Occurrence admission
-(`AdmitScheduledOccurrenceHandler`) and offline-gap recording
-(`RecordOfflineMissedOccurrenceHandler`) exist in `ora-application` but are not yet composed into the
-Backend, so Desktop does not trigger scheduled runs yet. Creating or updating a `cloud` task is
-rejected as an invalid request.
+The definition use cases, history reads and the local scheduler are wired into Desktop. Occurrence
+admission (`AdmitScheduledOccurrenceHandler`) and offline-gap recording
+(`RecordOfflineMissedOccurrenceHandler`) are implemented in `ora-application` and composed into the
+Backend: a `local` task triggers on schedule while Desktop is running, and due points that passed while
+it was closed are recorded `missed` without backfill. Creating or updating a `cloud` task is rejected
+as an invalid request.
 
 | Operation | Effect |
 |---|---|
