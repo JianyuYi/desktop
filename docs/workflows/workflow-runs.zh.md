@@ -62,6 +62,8 @@
 
 交互的 Agent 节点在第一个回合之后停下等待输入。后续消息作为人工回合在同一会话上运行，`completeWorkflowNode` 手动完成节点；一个完成认领防止后续回合与手动完成竞争。Iteration 区域的成员默认不是交互的，运行时拒绝交互成员。
 
+每个停靠回合都会写入完成快照：turn key、stop reason、blockers 和最终 assistant 文本的 digest。只有 `EndTurn` 且没有 blocker 的回合才能正常完成；停止、截断、拒答或未知终态会保持等待输入，`completeWorkflowNode` 返回 `workflow_node_incomplete`，除非显式传 `force`；turn key 或 digest 变化分别返回 `workflow_node_turn_changed` / `workflow_node_output_changed`。会话末尾的步骤卡片是唯一的推进入口，提供继续或二次确认后的强制完成。如果流在 stop reason 持久化前被 drop，节点会先写 provisional 快照，之后完成时在回合收敛后修复该快照。
+
 ## 变量与类型
 
 运行的变量池保存在 `workflow_runs.payload` 中。它的目录声明类型化的 Start 输入和产生数据的节点的稳定输出；启用结构化输出时还声明 `agent-1.structured_output`。`variablePool.values` 只保存已赋值的值。节点完成时的写入与节点状态转换在同一个事务里提交。启动指令留在 `workflow_runs.input` 中，不是可选择的变量。

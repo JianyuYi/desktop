@@ -114,6 +114,15 @@ human turns on the same session, and `completeWorkflowNode` completes the node m
 claim prevents a follow-up racing against manual completion. Region members of an Iteration default
 to non-interactive and the runtime rejects interactive members.
 
+Each parked turn persists a completion snapshot: its turn key, stop reason, blockers and the final
+assistant-text digest. Only an `EndTurn` turn without blockers completes normally. A stopped,
+truncated, refused or unknown turn keeps the node awaiting input, and `completeWorkflowNode` rejects
+it with `workflow_node_incomplete` unless `force` is requested; a changed turn or output digest
+returns `workflow_node_turn_changed` or `workflow_node_output_changed`. The step card at the end of
+the conversation is the only advance action, offering continue or a confirmed forced completion. A
+turn whose stream dropped before its stop reason became durable parks provisionally, and a later
+completion attempt repairs the snapshot once the turn settles.
+
 ## Variables and types
 
 The run's variable pool lives in `workflow_runs.payload`. Its catalog declares typed Start inputs and

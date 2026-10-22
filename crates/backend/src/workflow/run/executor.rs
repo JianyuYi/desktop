@@ -70,6 +70,7 @@ pub struct WorkflowRunNodeExecutor {
 impl WorkflowRunNodeExecutor {
     /// Builds an executor from the session runtime, persistence, role catalog, engine callback,
     /// and the shared transition sink.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent_runtime: Arc<AgentRuntimeManager>,
         pool: RepositoryPool,
