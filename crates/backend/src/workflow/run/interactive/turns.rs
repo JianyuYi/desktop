@@ -1,7 +1,7 @@
 //! Workflow-owned admission and cleanup around a session's human prompt stream.
 
 use super::CompletingNodeRuns;
-use super::session::HumanTurnAdmission;
+use super::session::{HumanTurnAdmission, restore_human_turn};
 use crate::agent_runtime::{AgentRuntimeManager, SessionEventStream};
 use crate::error::BackendError;
 use crate::git_cleanup::KeyedResourceLocks;
@@ -9,6 +9,7 @@ use crate::workflow::run::transitions::WorkflowRunTransitions;
 use ora_contracts::{PromptSessionEvent, PromptSessionRequest};
 use ora_db::RepositoryPool;
 use ora_domain::PromptInactivityPolicy;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Grants only human-turn coordination to Sessions, not workflow scheduling or completion control.
@@ -17,21 +18,27 @@ pub(crate) struct WorkflowSessionTurns {
     run_locks: Arc<KeyedResourceLocks>,
     completing_node_runs: Arc<CompletingNodeRuns>,
     transitions: Arc<WorkflowRunTransitions>,
+    sessions_root: PathBuf,
 }
 
 impl WorkflowSessionTurns {
     /// Shares the completion and callback gates owned by the run module.
+    ///
+    /// `sessions_root` lets the drop cleanup derive the settled turn's snapshot from the same
+    /// durable history the completion path reads.
     pub(in crate::workflow::run) fn new(
         pool: RepositoryPool,
         run_locks: Arc<KeyedResourceLocks>,
         completing_node_runs: Arc<CompletingNodeRuns>,
         transitions: Arc<WorkflowRunTransitions>,
+        sessions_root: PathBuf,
     ) -> Self {
         Self {
             pool,
             run_locks,
             completing_node_runs,
             transitions,
+            sessions_root,
         }
     }
 
@@ -65,13 +72,10 @@ impl WorkflowSessionTurns {
         {
             Ok(stream) => SessionEventStream::from(stream),
             Err(error) => {
-                // The turn never started; put the awaiting node back where it was.
+                // The turn never started; put the awaiting node back where it was without
+                // overwriting the snapshot of the turn that previously settled.
                 if let HumanTurnAdmission::Workflow { node_run_id, .. } = &admission {
-                    crate::workflow::run::interactive::end_human_turn(
-                        &self.transitions,
-                        node_run_id,
-                    )
-                    .await?;
+                    restore_human_turn(&self.transitions, node_run_id).await?;
                 }
                 return Err(error.into());
             }
@@ -79,9 +83,17 @@ impl WorkflowSessionTurns {
         let HumanTurnAdmission::Workflow { node_run_id, .. } = admission else {
             return Ok(stream);
         };
+        let pool = self.pool.clone();
+        let sessions_root = self.sessions_root.clone();
         let transitions = self.transitions.clone();
         Ok(stream.attach_cleanup(move || async move {
-            crate::workflow::run::interactive::end_human_turn(&transitions, &node_run_id).await
+            crate::workflow::run::interactive::end_human_turn(
+                &pool,
+                &sessions_root,
+                &transitions,
+                &node_run_id,
+            )
+            .await
         }))
     }
 }

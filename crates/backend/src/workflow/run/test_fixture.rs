@@ -3,6 +3,9 @@
 use super::interactive::CompletingNodeRuns;
 use super::transitions::WorkflowRunTransitions;
 use crate::git_cleanup::KeyedResourceLocks;
+use agent_client_protocol_schema::v1::{
+    ContentBlock, ContentChunk, SessionUpdate, StopReason, TextContent,
+};
 use ora_application::{
     Clock, ExecutionContext, NodeExecutor, ProjectRepository, SessionRepository,
     SkillMaterializationReceipt, WorkflowGraph, WorkflowGraphNode, WorkflowNodeRunIdGenerator,
@@ -22,7 +25,9 @@ use ora_domain::{
     Workflow, WorkflowId, WorkflowNodeRun, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRun,
     WorkflowRunId, WorkflowRunStatus, WorkflowSnapshot, WorkflowSnapshotId, WorkspaceLocation,
 };
+use ora_history::{HistoryLine, HistoryRecord, history_path};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -347,6 +352,79 @@ pub(crate) fn bind_and_park(
         )
         .unwrap();
     (session_id, node_run.id.clone())
+}
+
+/// Writes one open human turn (user message plus assistant reply, no `TurnEnded`) to history.
+///
+/// Turn cleanup derives its snapshot from the durable record, so tests seed the file instead of
+/// driving a real agent turn. [`end_fixture_turn`] appends the boundary that closes the turn.
+pub(crate) fn write_open_turn(
+    sessions_root: &Path,
+    session_id: &str,
+    user_text: &str,
+    assistant_text: &str,
+) {
+    append_history_record(
+        sessions_root,
+        session_id,
+        HistoryRecord::Update {
+            update: Box::new(SessionUpdate::UserMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new(user_text.to_string())),
+            ))),
+            tool_timing: None,
+        },
+    );
+    append_history_record(
+        sessions_root,
+        session_id,
+        HistoryRecord::Update {
+            update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::Text(TextContent::new(assistant_text.to_string())),
+            ))),
+            tool_timing: None,
+        },
+    );
+}
+
+/// Closes the fixture's open turn by appending its `TurnEnded` boundary.
+pub(crate) fn end_fixture_turn(sessions_root: &Path, session_id: &str, stop_reason: StopReason) {
+    append_history_record(
+        sessions_root,
+        session_id,
+        HistoryRecord::TurnEnded { stop_reason },
+    );
+}
+
+/// Writes one fully settled turn, so cleanup parks without waiting for a late boundary.
+pub(crate) fn write_settled_turn(
+    sessions_root: &Path,
+    session_id: &str,
+    user_text: &str,
+    assistant_text: &str,
+) {
+    write_open_turn(sessions_root, session_id, user_text, assistant_text);
+    end_fixture_turn(sessions_root, session_id, StopReason::EndTurn);
+}
+
+/// Appends one fixture history record at the session's next durable position.
+fn append_history_record(sessions_root: &Path, session_id: &str, record: HistoryRecord) {
+    let path = history_path(sessions_root, session_id).expect("history path");
+    std::fs::create_dir_all(path.parent().expect("history parent")).expect("history directory");
+    let next_seq = ora_history::read_session_history(sessions_root, session_id)
+        .expect("read fixture history")
+        .next_seq;
+    let line = HistoryLine::new("2026-10-22T10:00:00+08:00", next_seq, record);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("open history file");
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&line).expect("history JSON")
+    )
+    .expect("append history line");
 }
 
 /// Captures the run ids each invalidation identified, for tests of the D7 event channel.

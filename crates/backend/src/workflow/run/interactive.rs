@@ -1,5 +1,7 @@
 //! Coordination for human interaction with workflow node sessions.
 
+#[cfg(test)]
+mod cleanup_tests;
 mod completion;
 #[cfg(test)]
 mod inactivity_tests;

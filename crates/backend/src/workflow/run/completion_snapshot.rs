@@ -126,15 +126,15 @@ pub(crate) fn derive_completion_snapshot(
     let mut warnings = Vec::new();
     let mut blockers = Vec::new();
 
-    let (turn_key, stop_reason) = match turn {
-        Some((ended_seq, reason)) => (
+    let (turn_key, stop_reason) = match (user_seq, turn) {
+        (Some(user_seq), Some((ended_seq, reason))) => (
             Some(TurnKey {
-                user_seq: user_seq.expect("a settled turn has a user message"),
+                user_seq,
                 ended_seq,
             }),
             Some(super::executor::stop_reason_label(reason)),
         ),
-        None => (None, None),
+        _ => (None, None),
     };
 
     if let HistoryIntegrity::Damaged { unreadable_lines } = history.integrity {
@@ -146,13 +146,12 @@ pub(crate) fn derive_completion_snapshot(
         blockers.push(CompletionBlocker::new(CompletionBlockerKind::TurnUnknown));
     }
 
-    let final_text = turn.and_then(|(ended_seq, _)| {
-        final_assistant_text(
-            history,
-            user_seq.expect("a settled turn has a user message"),
-            ended_seq,
-        )
-    });
+    let final_text = match (user_seq, turn) {
+        (Some(user_seq), Some((ended_seq, _))) => {
+            final_assistant_text(history, user_seq, ended_seq)
+        }
+        _ => None,
+    };
     let output_digest = turn.map(|_| {
         format!(
             "sha256:{}",
@@ -258,7 +257,7 @@ fn final_assistant_text(history: &SessionHistory, user_seq: u32, ended_seq: u32)
             };
             assistant_text(update.as_ref()).map(str::to_string)
         })
-        .last()
+        .next_back()
 }
 
 /// Extracts the text block of one settled assistant message.

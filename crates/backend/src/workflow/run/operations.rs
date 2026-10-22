@@ -79,6 +79,7 @@ impl WorkflowRuns {
             self.run_locks.clone(),
             self.completing_node_runs.clone(),
             self.transitions.clone(),
+            self.sessions_root.clone(),
         )
     }
 

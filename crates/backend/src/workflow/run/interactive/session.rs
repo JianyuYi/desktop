@@ -11,17 +11,33 @@
 use crate::error::BackendError;
 use crate::git_cleanup::KeyedResourceLocks;
 use ora_application::{
-    AdvanceWorkflowRunResult, ApplicationError, RepositoryError, WorkflowGraph,
-    WorkflowRunEngineRepository,
+    AdvanceWorkflowRunResult, AgentOutputContract, ApplicationError, RepositoryError,
+    WorkflowGraph, WorkflowRunEngineRepository,
 };
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
 use ora_domain::{
     PromptInactivityPolicy, SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunStatus,
 };
+use ora_history::{SessionHistory, read_session_history};
+use ora_logging::ora_warn;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use super::super::completion_snapshot::{
+    CompletionSnapshot, completion_payload, derive_completion_snapshot, unknown_completion_snapshot,
+};
 use super::CompletingNodeRuns;
 use crate::workflow::run::transitions::WorkflowRunTransitions;
+
+/// How long cleanup waits for the dropped turn's durable `TurnEnded` before parking provisionally.
+///
+/// The runtime writes the boundary as part of settling the cancelled operation, so this window
+/// only covers the hand-off between the actor's confirmation and the history file.
+const TURN_END_WAIT: Duration = Duration::from_secs(2);
+
+/// How often cleanup re-reads the persisted history while waiting for `TurnEnded`.
+const TURN_END_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A granted turn carries workflow policy only when it has a workflow owner.
 #[derive(Debug, PartialEq, Eq)]
@@ -125,15 +141,64 @@ pub(crate) async fn begin_human_turn(
     .map_err(|source| BackendError::internal("repository operation did not complete", source))?
 }
 
-/// Flips an interactive node back to `Pending` when a turn ends or its stream is dropped.
+/// Parks an interactive node once its human turn ends or its stream is dropped.
+///
+/// Cleanup may run before the runtime has durably written this turn's `TurnEnded`, so it polls the
+/// persisted history for a bounded time before deriving the snapshot the read projection and a
+/// later completion both use. A turn that never settles parks with the provisional unknown
+/// snapshot, which a later `prepare` repairs once history catches up.
 ///
 /// This is deliberately exempt from the per-run gate: it is a guarded `Running → Pending` cleanup
 /// transition that computes no ready set, dispatches nothing, and becomes a no-op when the node has
 /// already reached a terminal state. Routing the fire-and-forget drop hook through the gate would
 /// add a run-id lookup and a blocking lock for no scheduling benefit. The commit still goes
-/// through the shared transition sink, so a completed flip publishes the run invalidation while
-/// a no-op flip publishes nothing.
+/// through the shared transition sink, so a completed park publishes the run invalidation while
+/// a no-op park publishes nothing.
 pub(crate) async fn end_human_turn(
+    pool: &RepositoryPool,
+    sessions_root: &Path,
+    transitions: &Arc<WorkflowRunTransitions>,
+    node_run_id: &WorkflowNodeRunId,
+) -> Result<(), BackendError> {
+    let context = {
+        let pool = pool.clone();
+        let node_run_id = node_run_id.clone();
+        tokio::task::spawn_blocking(move || TurnEndContext::load(&pool, &node_run_id))
+            .await
+            .map_err(|source| {
+                BackendError::internal("repository operation did not complete", source)
+            })??
+    };
+    let Some(context) = context else {
+        return Ok(());
+    };
+    let snapshot = match context.session_id.as_ref() {
+        Some(session_id) => {
+            settled_snapshot(sessions_root, session_id, context.output_contract.as_ref()).await
+        }
+        // A node without a bound session has no history to read; the conservative provisional
+        // snapshot keeps it parkable and lets a later completion force the decision.
+        None => unknown_completion_snapshot(true),
+    };
+    let completion = completion_payload(&snapshot);
+    let transitions = transitions.clone();
+    let node_run_id = node_run_id.clone();
+    tokio::task::spawn_blocking(move || {
+        transitions
+            .park_node_run(&node_run_id, &completion)
+            .map_err(repository_error)?;
+        Ok(())
+    })
+    .await
+    .map_err(|source| BackendError::internal("repository operation did not complete", source))?
+}
+
+/// Restores an awaiting node after a turn that never started and settled no turn.
+///
+/// The prompt failed before the runtime accepted it, so there is no new user message and no
+/// `TurnEnded` to snapshot. The plain guarded transition puts the node back at `Pending` without
+/// overwriting the snapshot of the turn that previously settled.
+pub(crate) async fn restore_human_turn(
     transitions: &Arc<WorkflowRunTransitions>,
     node_run_id: &WorkflowNodeRunId,
 ) -> Result<(), BackendError> {
@@ -151,6 +216,122 @@ pub(crate) async fn end_human_turn(
     })
     .await
     .map_err(|source| BackendError::internal("repository operation did not complete", source))?
+}
+
+/// The persisted inputs cleanup needs before it can snapshot a dropped turn.
+struct TurnEndContext {
+    /// The session bound to the node; absent when the node row no longer exists.
+    session_id: Option<SessionId>,
+    /// The frozen node's output contract, which decides whether the reply satisfies the node.
+    output_contract: Option<AgentOutputContract>,
+}
+
+impl TurnEndContext {
+    /// Reads the node's bound session and frozen output contract before cleanup parks it.
+    ///
+    /// A missing node or a node that already left `Running` returns `None`: the park guard would
+    /// reject the write anyway, so waiting for history and deriving a snapshot would be wasted.
+    fn load(
+        pool: &RepositoryPool,
+        node_run_id: &WorkflowNodeRunId,
+    ) -> Result<Option<Self>, BackendError> {
+        let repository = SqliteWorkflowRunEngineRepository::new(pool.clone());
+        let Some(node_run) = repository
+            .find_node_run_by_id(node_run_id)
+            .map_err(repository_error)?
+        else {
+            return Ok(None);
+        };
+        if node_run.status != WorkflowNodeStatus::Running {
+            return Ok(None);
+        }
+        let output_contract = match repository
+            .find_execution_context(&node_run.run_id)
+            .map_err(repository_error)?
+        {
+            Some(context) => frozen_output_contract(&context.graph_json, &node_run.node_id),
+            None => None,
+        };
+        Ok(Some(Self {
+            session_id: node_run.session_id,
+            output_contract,
+        }))
+    }
+}
+
+/// Returns the frozen node's declared output contract, or `None` when the graph cannot be read.
+///
+/// `begin_human_turn` already parsed the same frozen graph before granting the turn, so a parse
+/// failure here can only come from corrupt persisted state; parking without a contract still
+/// restores the node instead of stranding it at `Running`.
+fn frozen_output_contract(graph_json: &str, node_id: &str) -> Option<AgentOutputContract> {
+    let graph = match WorkflowGraph::parse(graph_json) {
+        Ok(graph) => graph,
+        Err(error) => {
+            ora_warn!(
+                node_id,
+                error = %error,
+                "parking an interactive node without its frozen output contract"
+            );
+            return None;
+        }
+    };
+    graph
+        .execution_node(node_id)?
+        .agent_config
+        .as_ref()?
+        .output_contract
+        .clone()
+}
+
+/// Derives the dropped turn's snapshot, waiting a bounded time for its durable `TurnEnded`.
+///
+/// Polling persisted history keeps cleanup independent of the runtime actor: the actor already
+/// wrote the boundary by the time the stream cleanup runs, but a slow filesystem flush must not
+/// park a node whose response the snapshot could still capture.
+async fn settled_snapshot(
+    sessions_root: &Path,
+    session_id: &SessionId,
+    output_contract: Option<&AgentOutputContract>,
+) -> CompletionSnapshot {
+    let deadline = tokio::time::Instant::now() + TURN_END_WAIT;
+    loop {
+        match read_history_blocking(sessions_root, session_id).await {
+            Ok(history) => {
+                let snapshot = derive_completion_snapshot(&history, output_contract, false);
+                if snapshot.turn_key.is_some() {
+                    return snapshot;
+                }
+            }
+            Err(error) => {
+                // A history that cannot be read can never yield a turn boundary, so waiting
+                // would only delay the park; the provisional snapshot records why it is unknown.
+                ora_warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to read session history when parking an interactive node"
+                );
+                return unknown_completion_snapshot(true);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return unknown_completion_snapshot(true);
+        }
+        tokio::time::sleep(TURN_END_POLL_INTERVAL).await;
+    }
+}
+
+/// Reads one session's history off the async runtime, since the read is blocking file I/O.
+async fn read_history_blocking(
+    sessions_root: &Path,
+    session_id: &SessionId,
+) -> Result<SessionHistory, BackendError> {
+    let root = sessions_root.to_path_buf();
+    let id = session_id.to_string();
+    tokio::task::spawn_blocking(move || read_session_history(&root, &id))
+        .await
+        .map_err(|source| BackendError::internal("history read did not complete", source))?
+        .map_err(|error| BackendError::internal("failed to read session history", error))
 }
 
 /// Renders the public rejection for a workflow node that cannot accept a prompt turn.
@@ -382,6 +563,8 @@ mod tests {
             let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
             let (session_id, _node_run_id) = bind_and_park(&pool, agent);
+            let sessions_root = temp.path().join("sessions");
+            write_settled_turn(&sessions_root, session_id.as_ref(), "go", "done");
 
             let (run_locks, completing) = locks();
             let (transitions, recording) = recording_transitions(&pool);
@@ -394,7 +577,9 @@ mod tests {
             )
             .await
             .unwrap();
-            end_human_turn(&transitions, &_node_run_id).await.unwrap();
+            end_human_turn(&pool, &sessions_root, &transitions, &_node_run_id)
+                .await
+                .unwrap();
 
             assert_eq!(
                 *recording.published.lock().unwrap(),
@@ -420,11 +605,18 @@ mod tests {
             let (_run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
 
-            // Park the node directly, then end a turn that never began: the node is Pending,
-            // so the Running -> Pending guard rejects.
+            // Park the node directly, then end a turn that never began: cleanup finds the node
+            // already outside `Running`, so its park guard has nothing to commit.
             let (_session_id, node_run_id) = bind_and_park(&pool, agent);
             let (transitions, recording) = recording_transitions(&pool);
-            end_human_turn(&transitions, &node_run_id).await.unwrap();
+            end_human_turn(
+                &pool,
+                &temp.path().join("sessions"),
+                &transitions,
+                &node_run_id,
+            )
+            .await
+            .unwrap();
 
             assert!(
                 recording.published.lock().unwrap().is_empty(),
