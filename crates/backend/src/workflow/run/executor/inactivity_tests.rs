@@ -122,6 +122,7 @@ fn wait_policy_preserves_real_session_failures_and_frozen_policy_across_retries(
                 &pool,
                 &agent_repository,
                 &SystemClock,
+                &temp.path().join("sessions"),
                 &temp.path().join("baselines"),
                 &transitions,
                 &node_run.id,

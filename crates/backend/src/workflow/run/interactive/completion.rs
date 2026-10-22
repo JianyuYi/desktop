@@ -4,14 +4,21 @@
 //! future agent/CLI path can reuse the same commit through the engine. The session stop and the
 //! engine commit are done by the caller around [`prepare_completion`].
 
-use super::super::executor::{apply_output_contract, stop_reason_label};
+use super::super::completion_snapshot::{
+    completion_final_text, derive_completion_snapshot, parse_completion_snapshot,
+    unknown_completion_snapshot,
+};
+use super::super::executor::apply_output_contract;
 use super::super::worktree::{capture_worktree_snapshot, compute_file_changes};
 use super::CompletingNodeRuns;
 use crate::agent_runtime::AgentRuntimeManager;
-use crate::error::BackendError;
+use crate::error::{BackendError, ErrorClassification};
 use crate::git_cleanup::KeyedResourceLocks;
-use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate, StopReason};
+#[cfg(test)]
+use agent_client_protocol_schema::v1::StopReason;
+use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
 use ora_application::{ApplicationError, FileChange, WorkflowGraph, WorkflowRunEngineRepository};
+use ora_contracts::{EmptyErrorParams, PublicError};
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
 use ora_domain::{
     SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunId, WorkflowRunStatus,
@@ -137,6 +144,7 @@ pub(crate) fn prepare_completion(
     agent_runtime: &AgentRuntimeManager,
     run_id: &WorkflowRunId,
     node_id: &str,
+    force: bool,
 ) -> Result<PreparedCompletion, BackendError> {
     let repository = SqliteWorkflowRunEngineRepository::new(pool.clone());
     let context = repository
@@ -179,25 +187,59 @@ pub(crate) fn prepare_completion(
         }
         .into());
     }
-    // The final assistant message and the stop reason of the last turn both come from the same
-    // durable history, so they are read together rather than re-reading the file.
-    let (raw_output, stop_reason) = match node_run.session_id.as_ref() {
+    let output_contract = agent_config.and_then(|config| config.output_contract.as_ref());
+    let stored = parse_completion_snapshot(node_run.payload.as_deref());
+    let has_stored_snapshot = stored.is_some();
+    let (raw_output, derived) = match node_run.session_id.as_ref() {
         Some(session_id) => {
             let history = read_session_history(sessions_root, session_id.as_ref())
                 .map_err(|error| BackendError::internal("failed to read session history", error))?;
+            let final_text = completion_final_text(&history);
+            // Pre-snapshot nodes keep the legacy "last assistant message" fallback; a node that
+            // parked with a snapshot uses only the contract window.
+            let output = if has_stored_snapshot {
+                final_text
+            } else {
+                final_text.or_else(|| assistant_output_from_history(&history))
+            };
             (
-                assistant_output_from_history(&history),
-                last_stop_reason(&history).map(stop_reason_label),
+                output,
+                derive_completion_snapshot(&history, output_contract, false),
             )
         }
-        None => (None, None),
+        None => (None, unknown_completion_snapshot(false)),
     };
-    let (output, structured_output) = apply_output_contract(
-        agent_config.and_then(|config| config.output_contract.as_ref()),
-        raw_output,
-        &node_run.node_id,
-    )
-    .map_err(|error| BackendError::internal("failed to parse structured workflow output", error))?;
+    if let Some(stored) = &stored {
+        if stored.turn_key.is_some() && stored.turn_key != derived.turn_key {
+            return Err(completion_rejected(PublicError::WorkflowNodeTurnChanged(
+                EmptyErrorParams {},
+            )));
+        }
+        if stored.output_digest.is_some() && stored.output_digest != derived.output_digest {
+            return Err(completion_rejected(PublicError::WorkflowNodeOutputChanged(
+                EmptyErrorParams {},
+            )));
+        }
+    }
+    let snapshot = stored.unwrap_or(derived);
+    // Legacy `Pending` nodes predate the snapshot. They keep the old completion behavior until
+    // `prepare` materializes them; only a node that parked with a snapshot is gated here.
+    if has_stored_snapshot && !force && !snapshot.blockers.is_empty() {
+        return Err(completion_rejected(PublicError::WorkflowNodeIncomplete(
+            EmptyErrorParams {},
+        )));
+    }
+    let stop_reason = snapshot.stop_reason.clone();
+    let (output, structured_output) =
+        match apply_output_contract(output_contract, raw_output.clone(), &node_run.node_id) {
+            Ok(output) => output,
+            Err(_) if force => (raw_output, None),
+            Err(_) => {
+                return Err(completion_rejected(PublicError::WorkflowNodeIncomplete(
+                    EmptyErrorParams {},
+                )));
+            }
+        };
 
     let file_changes = match load_worktree_baseline(baselines_root, &node_run.id) {
         Some(baseline) => {
@@ -240,6 +282,7 @@ fn assistant_output_from_history(history: &SessionHistory) -> Option<String> {
 
 /// Returns the stop reason of the last settled turn, which is why the interactive node parked
 /// awaiting input rather than completing automatically.
+#[cfg(test)]
 fn last_stop_reason(history: &SessionHistory) -> Option<StopReason> {
     history.lines.iter().rev().find_map(|line| {
         let HistoryRecord::TurnEnded { stop_reason } = &line.record else {
@@ -275,6 +318,15 @@ fn load_worktree_baseline(
 /// Maps a workflow engine repository failure onto the public backend error.
 fn repository_error(source: ora_application::RepositoryError) -> BackendError {
     BackendError::from(ApplicationError::WorkflowRunRepository { source })
+}
+
+/// Rejects a completion whose snapshot no longer supports it, without exposing history details.
+fn completion_rejected(public: PublicError) -> BackendError {
+    BackendError::new(
+        ErrorClassification::Conflict,
+        public,
+        "interactive completion rejected by its completion snapshot",
+    )
 }
 
 #[cfg(test)]

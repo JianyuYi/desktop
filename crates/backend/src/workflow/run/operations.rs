@@ -209,6 +209,7 @@ impl WorkflowRuns {
                     &agent_runtime,
                     &run_id,
                     &node_id,
+                    request.force,
                 )
             })
             .await

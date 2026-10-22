@@ -66,6 +66,30 @@ impl WorkflowRunTransitions {
         Ok(result)
     }
 
+    /// Parks one running interactive node with its completion snapshot in the same guarded
+    /// transaction, then publishes the run invalidation once the commit succeeds.
+    ///
+    /// A rejected guard (a cancel or completion won the race) is an idempotent no-op: no payload
+    /// is written and no invalidation is published.
+    pub(crate) fn park_node_run(
+        &self,
+        node_run_id: &WorkflowNodeRunId,
+        completion: &serde_json::Value,
+    ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
+        let repository = SqliteWorkflowRunEngineRepository::new(self.pool.clone());
+        let result = repository.park_node_run(
+            node_run_id,
+            completion,
+            SystemClock.now_timestamp_millis(),
+        )?;
+        if matches!(result, AdvanceWorkflowRunResult::Advanced)
+            && let Some(node_run) = repository.find_node_run_by_id(node_run_id)?
+        {
+            self.events.publish_run_invalidated(&node_run.run_id);
+        }
+        Ok(result)
+    }
+
     /// Publishes one run invalidation after a commit that happened outside this sink.
     ///
     /// Resume snapshot-switch commits through the engine repository rather than this sink; the
@@ -149,6 +173,93 @@ mod tests {
                 recording.published.lock().unwrap().is_empty(),
                 "an idempotently rejected transition must not publish"
             );
+        });
+    }
+
+    /// A park commit writes the snapshot and the Pending status in one guarded update and
+    /// publishes exactly one invalidation.
+    #[test]
+    fn park_node_run_commits_snapshot_and_status() {
+        run_test(async {
+            let (temp, pool) = bootstrap();
+            let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
+            let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
+            let recording = Arc::new(RecordingInvalidations::default());
+            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+            let snapshot = serde_json::json!({
+                "completion": {
+                    "turnKey": { "userSeq": 1, "endedSeq": 2 },
+                    "blockers": []
+                }
+            });
+
+            let result = transitions.park_node_run(&agent.id, &snapshot).unwrap();
+
+            assert_eq!(result, ora_application::AdvanceWorkflowRunResult::Advanced);
+            assert_eq!(
+                *recording.published.lock().unwrap(),
+                vec![run_id.to_string()]
+            );
+            let parked = SqliteWorkflowRunRepository::new(pool)
+                .list_node_runs(&run_id)
+                .unwrap()
+                .into_iter()
+                .find(|n| n.node_id == "agent")
+                .unwrap();
+            assert_eq!(parked.status, WorkflowNodeStatus::Pending);
+            let payload: serde_json::Value =
+                serde_json::from_str(parked.payload.as_deref().unwrap()).unwrap();
+            assert_eq!(payload["completion"]["turnKey"]["userSeq"], 1);
+            assert_eq!(payload["completion"]["turnKey"]["endedSeq"], 2);
+        });
+    }
+
+    /// A rejected park guard writes neither the snapshot nor an invalidation.
+    #[test]
+    fn rejected_park_writes_nothing() {
+        run_test(async {
+            let (temp, pool) = bootstrap();
+            let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
+            let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
+            let recording = Arc::new(RecordingInvalidations::default());
+            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+
+            transitions
+                .transition_node_run_status(
+                    &agent.id,
+                    WorkflowNodeStatus::Running,
+                    WorkflowNodeStatus::Pending,
+                )
+                .unwrap();
+            recording.published.lock().unwrap().clear();
+            let before = SqliteWorkflowRunRepository::new(pool.clone())
+                .list_node_runs(&run_id)
+                .unwrap()
+                .into_iter()
+                .find(|n| n.node_id == "agent")
+                .unwrap()
+                .payload;
+
+            let result = transitions
+                .park_node_run(
+                    &agent.id,
+                    &serde_json::json!({ "completion": { "blockers": [] } }),
+                )
+                .unwrap();
+
+            assert_eq!(
+                result,
+                ora_application::AdvanceWorkflowRunResult::NotRunning
+            );
+            assert!(recording.published.lock().unwrap().is_empty());
+            let after = SqliteWorkflowRunRepository::new(pool)
+                .list_node_runs(&run_id)
+                .unwrap()
+                .into_iter()
+                .find(|n| n.node_id == "agent")
+                .unwrap()
+                .payload;
+            assert_eq!(after, before);
         });
     }
 }

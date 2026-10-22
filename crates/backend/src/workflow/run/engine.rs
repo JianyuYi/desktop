@@ -173,6 +173,7 @@ impl WorkflowRunInvalidationPublisher for WorkflowRunInvalidations {
 pub(crate) fn build_workflow_run_engine(
     agent_runtime: Arc<AgentRuntimeManager>,
     pool: RepositoryPool,
+    sessions_root: PathBuf,
     baselines_root: PathBuf,
     clock: SystemClock,
     app_events: AppEventPublisher,
@@ -194,6 +195,7 @@ pub(crate) fn build_workflow_run_engine(
         SqliteAgentDefinitionRepository::new(pool.clone()),
         callback.clone(),
         clock,
+        sessions_root,
         baselines_root,
         transitions.clone(),
     );

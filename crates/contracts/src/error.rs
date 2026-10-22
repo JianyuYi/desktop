@@ -287,6 +287,9 @@ pub enum PublicError {
     WorkflowNodeNotFound(EmptyErrorParams),
     WorkflowNodeNotAwaitingInput(EmptyErrorParams),
     WorkflowNodeNotDiagnosable(EmptyErrorParams),
+    WorkflowNodeIncomplete(EmptyErrorParams),
+    WorkflowNodeTurnChanged(EmptyErrorParams),
+    WorkflowNodeOutputChanged(EmptyErrorParams),
 }
 
 impl PublicError {
@@ -429,6 +432,9 @@ impl PublicError {
             Self::WorkflowNodeNotFound(_) => "workflow_node_not_found",
             Self::WorkflowNodeNotAwaitingInput(_) => "workflow_node_not_awaiting_input",
             Self::WorkflowNodeNotDiagnosable(_) => "workflow_node_not_diagnosable",
+            Self::WorkflowNodeIncomplete(_) => "workflow_node_incomplete",
+            Self::WorkflowNodeTurnChanged(_) => "workflow_node_turn_changed",
+            Self::WorkflowNodeOutputChanged(_) => "workflow_node_output_changed",
         }
     }
 }
@@ -657,6 +663,9 @@ mod tests {
             PublicError::WorkflowNodeNotFound(empty),
             PublicError::WorkflowNodeNotAwaitingInput(empty),
             PublicError::WorkflowNodeNotDiagnosable(empty),
+            PublicError::WorkflowNodeIncomplete(empty),
+            PublicError::WorkflowNodeTurnChanged(empty),
+            PublicError::WorkflowNodeOutputChanged(empty),
         ];
 
         for error in &samples {
@@ -786,7 +795,10 @@ mod tests {
                 | PublicError::WorkflowRunNotEditable(_)
                 | PublicError::WorkflowNodeNotFound(_)
                 | PublicError::WorkflowNodeNotAwaitingInput(_)
-                | PublicError::WorkflowNodeNotDiagnosable(_) => {}
+                | PublicError::WorkflowNodeNotDiagnosable(_)
+                | PublicError::WorkflowNodeIncomplete(_)
+                | PublicError::WorkflowNodeTurnChanged(_)
+                | PublicError::WorkflowNodeOutputChanged(_) => {}
             }
         }
 
@@ -797,7 +809,7 @@ mod tests {
     #[test]
     fn public_error_codes_match_serde_tags_for_every_variant() {
         let samples = public_error_samples();
-        assert_eq!(samples.len(), 119);
+        assert_eq!(samples.len(), 122);
 
         for error in samples {
             let serialized = serde_json::to_value(&error).unwrap();

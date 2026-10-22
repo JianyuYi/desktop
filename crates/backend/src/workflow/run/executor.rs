@@ -1,4 +1,7 @@
 use super::checkpoint::{fail_dispatched_node, record_pre_node_checkpoint};
+use super::completion_snapshot::{
+    completion_payload, derive_completion_snapshot, unknown_completion_snapshot,
+};
 use super::last_failure::previous_failure_for_injection;
 use super::prompt::{
     RequiredWorkflowSkill, WorkflowPromptRequest, assemble_workflow_prompt, render_previous_failure,
@@ -24,7 +27,8 @@ use ora_contracts::{
     StopSessionRequest,
 };
 use ora_db::{RepositoryPool, SqliteAgentDefinitionRepository, SqliteWorkflowRunEngineRepository};
-use ora_domain::{AgentDefinitionId, Namespace, SessionId, WorkflowNodeRunId, WorkflowNodeStatus};
+use ora_domain::{AgentDefinitionId, Namespace, SessionId, WorkflowNodeRunId};
+use ora_history::read_session_history;
 use ora_logging::ora_warn;
 
 use super::transitions::WorkflowRunTransitions;
@@ -54,6 +58,8 @@ pub struct WorkflowRunNodeExecutor {
     agent_repository: SqliteAgentDefinitionRepository,
     callback: Arc<dyn WorkflowRunCallback>,
     clock: SystemClock,
+    /// Root of durable session history, read once when an interactive turn parks.
+    sessions_root: PathBuf,
     /// Root for the per-node worktree baseline snapshots an interactive node diffs at completion.
     baselines_root: PathBuf,
     /// Commits the interactive park transition with the shared publish-after-commit discipline.
@@ -70,6 +76,7 @@ impl WorkflowRunNodeExecutor {
         agent_repository: SqliteAgentDefinitionRepository,
         callback: Arc<dyn WorkflowRunCallback>,
         clock: SystemClock,
+        sessions_root: PathBuf,
         baselines_root: PathBuf,
         transitions: Arc<WorkflowRunTransitions>,
     ) -> Self {
@@ -79,6 +86,7 @@ impl WorkflowRunNodeExecutor {
             agent_repository,
             callback,
             clock,
+            sessions_root,
             baselines_root,
             transitions,
             loop_exit_tasks: Arc::default(),
@@ -101,6 +109,7 @@ impl NodeExecutor for WorkflowRunNodeExecutor {
         let agent_repository = self.agent_repository.clone();
         let callback = self.callback.clone();
         let clock = self.clock;
+        let sessions_root = self.sessions_root.clone();
         let baselines_root = self.baselines_root.clone();
         let transitions = self.transitions.clone();
         let node_run_id = node_run_id.clone();
@@ -117,6 +126,7 @@ impl NodeExecutor for WorkflowRunNodeExecutor {
                 &pool,
                 &agent_repository,
                 &clock,
+                &sessions_root,
                 &baselines_root,
                 &transitions,
                 &node_run_id,
@@ -314,18 +324,12 @@ impl NodeExecutionError {
     }
 }
 
-/// Whether a node's stop should park an interactive node at `Pending` instead of reporting a
-/// result. Completed and user-cancelled turns keep the conversation open for follow-up; a refusal
-/// still fails the node.
-fn pauses_interactive_node(interactive: bool, stop_reason: StopReason) -> bool {
+/// Whether a settled turn should park an interactive node at `Pending`.
+///
+/// Every interactive turn parks, including `Refusal` and unknown terminal reasons: the snapshot
+/// records the blocker, while non-interactive nodes keep their existing failure behavior.
+fn pauses_interactive_node(interactive: bool) -> bool {
     interactive
-        && matches!(
-            stop_reason,
-            StopReason::EndTurn
-                | StopReason::MaxTokens
-                | StopReason::MaxTurnRequests
-                | StopReason::Cancelled
-        )
 }
 
 /// Runs the start → prompt → stop session chain for one agent node.
@@ -335,6 +339,7 @@ async fn drive_agent_node(
     pool: &RepositoryPool,
     agent_repository: &SqliteAgentDefinitionRepository,
     clock: &SystemClock,
+    sessions_root: &Path,
     baselines_root: &Path,
     transitions: &WorkflowRunTransitions,
     node_run_id: &WorkflowNodeRunId,
@@ -532,20 +537,28 @@ async fn drive_agent_node(
         // A baseline is execution provenance, not a prerequisite, so a missing
         // (oversized/unavailable) baseline or a failed write still parks the node; its completion
         // later reports no file changes rather than failing the run.
-        if pauses_interactive_node(config.interactive, stop_reason) {
+        if pauses_interactive_node(config.interactive) {
             if let Some(baseline) = baseline.as_ref()
                 && let Err(error) = persist_worktree_baseline(baselines_root, node_run_id, baseline)
             {
                 ora_warn!(node_run_id = %node_run_id, error = %error, "failed to persist worktree baseline; the node still parks and its completion reports no file changes");
             }
-            // The park commits through the shared transition sink so the awaiting state is
-            // observable through the same invalidation channel as every engine transition
-            // (ADR D7); a guard rejection (cancel or completion won the race) stays a no-op.
-            transitions.transition_node_run_status(
-                node_run_id,
-                WorkflowNodeStatus::Running,
-                WorkflowNodeStatus::Pending,
-            )?;
+            // The snapshot and the guarded status flip commit together so a `Pending` row always
+            // has the completion facts the read projection parses.
+            let snapshot = match read_session_history(sessions_root, session_id.as_ref()) {
+                Ok(history) => {
+                    derive_completion_snapshot(&history, config.output_contract.as_ref(), false)
+                }
+                Err(error) => {
+                    ora_warn!(
+                        node_run_id = %node_run_id,
+                        error = %error,
+                        "failed to read session history while parking; recording an unknown completion snapshot"
+                    );
+                    unknown_completion_snapshot(false)
+                }
+            };
+            transitions.park_node_run(node_run_id, &completion_payload(&snapshot))?;
             return Ok(AgentNodeOutcome::AwaitingInput);
         }
 
@@ -779,17 +792,11 @@ mod tests {
         )
     }
 
-    /// Verifies completed and user-cancelled turns park an interactive node.
+    /// Verifies every interactive turn parks, while non-interactive nodes keep the default path.
     #[test]
-    fn pauses_interactive_node_parks_completed_and_cancelled_turns() {
-        assert!(pauses_interactive_node(true, StopReason::EndTurn));
-        assert!(pauses_interactive_node(true, StopReason::MaxTokens));
-        assert!(pauses_interactive_node(true, StopReason::MaxTurnRequests));
-        // A refusal still fails the node, while an explicit prompt cancellation yields control.
-        assert!(!pauses_interactive_node(true, StopReason::Refusal));
-        assert!(pauses_interactive_node(true, StopReason::Cancelled));
-        // Non-interactive nodes keep the existing complete-on-EndTurn behavior.
-        assert!(!pauses_interactive_node(false, StopReason::EndTurn));
+    fn pauses_interactive_node_parks_every_interactive_turn() {
+        assert!(pauses_interactive_node(true));
+        assert!(!pauses_interactive_node(false));
     }
 
     fn model_option(options: Vec<SessionConfigSelectOption>) -> SessionConfigOption {

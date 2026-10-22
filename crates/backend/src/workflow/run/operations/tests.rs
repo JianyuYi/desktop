@@ -96,6 +96,7 @@ fn concurrent_completions_commit_once_and_leave_the_session_read_only() {
         let request = CompleteWorkflowNodeRequest {
             run_id: "run-1".to_string(),
             node_id: "agent".to_string(),
+            force: false,
             requester: Some(NodeCompletionRequester::Human),
         };
         let (first, second) = tokio::join!(
@@ -162,6 +163,7 @@ fn prepare_failure_releases_the_claim_for_retry() {
         let request = CompleteWorkflowNodeRequest {
             run_id: "run-1".to_string(),
             node_id: "agent".to_string(),
+            force: false,
             requester: Some(NodeCompletionRequester::Human),
         };
         let error = fixture
@@ -211,6 +213,7 @@ fn failed_prompt_start_restores_the_awaiting_node_before_returning() {
             .complete_node(CompleteWorkflowNodeRequest {
                 run_id: "run-1".to_string(),
                 node_id: "agent".to_string(),
+                force: false,
                 requester: None,
             })
             .await
@@ -247,6 +250,7 @@ fn cancellation_commits_even_when_session_cleanup_fails() {
             .complete_node(CompleteWorkflowNodeRequest {
                 run_id: "run-1".to_string(),
                 node_id: "agent".to_string(),
+                force: false,
                 requester: Some(NodeCompletionRequester::Human),
             })
             .await
@@ -315,6 +319,7 @@ fn concurrent_cancel_and_complete_report_the_committed_outcome() {
             fixture.runs.complete_node(CompleteWorkflowNodeRequest {
                 run_id: "run-1".to_string(),
                 node_id: "agent".to_string(),
+                force: false,
                 requester: None,
             }),
         );
