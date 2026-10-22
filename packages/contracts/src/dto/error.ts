@@ -189,9 +189,18 @@ export type ContractError =
     | { "code": "workflow_node_not_found"; "params": EmptyErrorParams }
     | { "code": "workflow_node_not_awaiting_input"; "params": EmptyErrorParams }
     | { "code": "workflow_node_not_diagnosable"; "params": EmptyErrorParams }
-    | { "code": "workflow_node_incomplete"; "params": EmptyErrorParams }
-    | { "code": "workflow_node_turn_changed"; "params": EmptyErrorParams }
-    | { "code": "workflow_node_output_changed"; "params": EmptyErrorParams }
+    | {
+      "code": "workflow_node_incomplete";
+      "params": WorkflowNodeIncompleteParams;
+    }
+    | {
+      "code": "workflow_node_turn_changed";
+      "params": WorkflowNodeTurnChangedParams;
+    }
+    | {
+      "code": "workflow_node_output_changed";
+      "params": WorkflowNodeOutputChangedParams;
+    }
   );
 
 /**
@@ -415,9 +424,18 @@ export type PublicError =
   | { "code": "workflow_node_not_found"; "params": EmptyErrorParams }
   | { "code": "workflow_node_not_awaiting_input"; "params": EmptyErrorParams }
   | { "code": "workflow_node_not_diagnosable"; "params": EmptyErrorParams }
-  | { "code": "workflow_node_incomplete"; "params": EmptyErrorParams }
-  | { "code": "workflow_node_turn_changed"; "params": EmptyErrorParams }
-  | { "code": "workflow_node_output_changed"; "params": EmptyErrorParams };
+  | {
+    "code": "workflow_node_incomplete";
+    "params": WorkflowNodeIncompleteParams;
+  }
+  | {
+    "code": "workflow_node_turn_changed";
+    "params": WorkflowNodeTurnChangedParams;
+  }
+  | {
+    "code": "workflow_node_output_changed";
+    "params": WorkflowNodeOutputChangedParams;
+  };
 
 /**
  * Identifies one Ora request across adapters, spans, responses, and completion events.
@@ -446,6 +464,68 @@ export type SkillFolderConflictParams = { name: string };
  * Carries the user-selected base branch name when Git cannot resolve it.
  */
 export type TaskBaseBranchNotFoundParams = { branchName: string };
+
+/**
+ * Carries one blocker of a rejected completion with the detail its kind does not encode.
+ */
+export type WorkflowNodeCompletionBlocker = {
+  kind: WorkflowNodeCompletionBlockerKind;
+  /**
+   * Human-readable technical detail, e.g. the schema message; never user-authored text.
+   */
+  message?: string;
+};
+
+/**
+ * Enumerates the declared reasons an awaiting interactive turn is not complete.
+ */
+export type WorkflowNodeCompletionBlockerKind =
+  | "turn_stopped"
+  | "turn_truncated"
+  | "turn_refused"
+  | "turn_unknown"
+  | "structured_invalid"
+  | "output_missing";
+
+/**
+ * Lists every blocker that stops a completion before an explicit force.
+ */
+export type WorkflowNodeIncompleteParams = {
+  nodeId: string;
+  blockers: Array<WorkflowNodeCompletionBlocker>;
+};
+
+/**
+ * Reports that the final assistant text changed after the node parked.
+ *
+ * The digests are the same `sha256:` strings the completion snapshot stores, so a client can
+ * compare them without reading the session history.
+ */
+export type WorkflowNodeOutputChangedParams = {
+  nodeId: string;
+  expected: string | null;
+  actual: string | null;
+};
+
+/**
+ * Reports that the turn a client tried to complete is no longer the session's last settled turn.
+ *
+ * A `None` side means that turn had no `TurnEnded` at all, which is itself a blocker and never
+ * an implicit match: the completion must be re-read and retried.
+ */
+export type WorkflowNodeTurnChangedParams = {
+  nodeId: string;
+  expected: WorkflowNodeTurnKey | null;
+  actual: WorkflowNodeTurnKey | null;
+};
+
+/**
+ * Identifies one settled turn by the positions of its user message and its `TurnEnded`.
+ *
+ * Carried in the two completion-conflict errors so a client can show which turn it validated
+ * against and which turn the session now holds, instead of re-reading the whole node payload.
+ */
+export type WorkflowNodeTurnKey = { userSeq: number; endedSeq: number };
 
 /**
  * Names the Start variable whose supplied or missing value a run rejected, with the reason.

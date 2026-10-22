@@ -88,6 +88,78 @@ pub struct WorkflowRunInputInvalidParams {
     pub reason: String,
 }
 
+/// Identifies one settled turn by the positions of its user message and its `TurnEnded`.
+///
+/// Carried in the two completion-conflict errors so a client can show which turn it validated
+/// against and which turn the session now holds, instead of re-reading the whole node payload.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "error.ts")]
+pub struct WorkflowNodeTurnKey {
+    pub user_seq: u32,
+    pub ended_seq: u32,
+}
+
+/// Reports that the turn a client tried to complete is no longer the session's last settled turn.
+///
+/// A `None` side means that turn had no `TurnEnded` at all, which is itself a blocker and never
+/// an implicit match: the completion must be re-read and retried.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "error.ts")]
+pub struct WorkflowNodeTurnChangedParams {
+    pub node_id: String,
+    pub expected: Option<WorkflowNodeTurnKey>,
+    pub actual: Option<WorkflowNodeTurnKey>,
+}
+
+/// Reports that the final assistant text changed after the node parked.
+///
+/// The digests are the same `sha256:` strings the completion snapshot stores, so a client can
+/// compare them without reading the session history.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "error.ts")]
+pub struct WorkflowNodeOutputChangedParams {
+    pub node_id: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+}
+
+/// Enumerates the declared reasons an awaiting interactive turn is not complete.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export_to = "error.ts")]
+pub enum WorkflowNodeCompletionBlockerKind {
+    TurnStopped,
+    TurnTruncated,
+    TurnRefused,
+    TurnUnknown,
+    StructuredInvalid,
+    OutputMissing,
+}
+
+/// Carries one blocker of a rejected completion with the detail its kind does not encode.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "error.ts")]
+pub struct WorkflowNodeCompletionBlocker {
+    pub kind: WorkflowNodeCompletionBlockerKind,
+    /// Human-readable technical detail, e.g. the schema message; never user-authored text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+}
+
+/// Lists every blocker that stops a completion before an explicit force.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "error.ts")]
+pub struct WorkflowNodeIncompleteParams {
+    pub node_id: String,
+    pub blockers: Vec<WorkflowNodeCompletionBlocker>,
+}
+
 /// Carries the user-selected base branch name when Git cannot resolve it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -287,9 +359,9 @@ pub enum PublicError {
     WorkflowNodeNotFound(EmptyErrorParams),
     WorkflowNodeNotAwaitingInput(EmptyErrorParams),
     WorkflowNodeNotDiagnosable(EmptyErrorParams),
-    WorkflowNodeIncomplete(EmptyErrorParams),
-    WorkflowNodeTurnChanged(EmptyErrorParams),
-    WorkflowNodeOutputChanged(EmptyErrorParams),
+    WorkflowNodeIncomplete(WorkflowNodeIncompleteParams),
+    WorkflowNodeTurnChanged(WorkflowNodeTurnChangedParams),
+    WorkflowNodeOutputChanged(WorkflowNodeOutputChangedParams),
 }
 
 impl PublicError {
@@ -663,9 +735,26 @@ mod tests {
             PublicError::WorkflowNodeNotFound(empty),
             PublicError::WorkflowNodeNotAwaitingInput(empty),
             PublicError::WorkflowNodeNotDiagnosable(empty),
-            PublicError::WorkflowNodeIncomplete(empty),
-            PublicError::WorkflowNodeTurnChanged(empty),
-            PublicError::WorkflowNodeOutputChanged(empty),
+            PublicError::WorkflowNodeIncomplete(WorkflowNodeIncompleteParams {
+                node_id: "review".to_string(),
+                blockers: vec![WorkflowNodeCompletionBlocker {
+                    kind: WorkflowNodeCompletionBlockerKind::TurnStopped,
+                    message: None,
+                }],
+            }),
+            PublicError::WorkflowNodeTurnChanged(WorkflowNodeTurnChangedParams {
+                node_id: "review".to_string(),
+                expected: Some(WorkflowNodeTurnKey {
+                    user_seq: 1,
+                    ended_seq: 2,
+                }),
+                actual: None,
+            }),
+            PublicError::WorkflowNodeOutputChanged(WorkflowNodeOutputChangedParams {
+                node_id: "review".to_string(),
+                expected: Some("sha256:abc".to_string()),
+                actual: Some("sha256:def".to_string()),
+            }),
         ];
 
         for error in &samples {
@@ -795,10 +884,7 @@ mod tests {
                 | PublicError::WorkflowRunNotEditable(_)
                 | PublicError::WorkflowNodeNotFound(_)
                 | PublicError::WorkflowNodeNotAwaitingInput(_)
-                | PublicError::WorkflowNodeNotDiagnosable(_)
-                | PublicError::WorkflowNodeIncomplete(_)
-                | PublicError::WorkflowNodeTurnChanged(_)
-                | PublicError::WorkflowNodeOutputChanged(_) => {}
+                | PublicError::WorkflowNodeNotDiagnosable(_) => {}
             }
         }
 
