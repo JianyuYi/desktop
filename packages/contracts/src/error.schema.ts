@@ -437,6 +437,15 @@ export const contractErrorSchema = z.object({
     }), z.object({
         "code": z.literal("workflow_node_not_diagnosable"),
         "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_incomplete"),
+        "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_turn_changed"),
+        "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_output_changed"),
+        "params": emptyErrorParamsSchema
     })]));
 
 export const publicErrorSchema = z.union([z.object({
@@ -816,5 +825,14 @@ export const publicErrorSchema = z.union([z.object({
         "params": emptyErrorParamsSchema
     }), z.object({
         "code": z.literal("workflow_node_not_diagnosable"),
+        "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_incomplete"),
+        "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_turn_changed"),
+        "params": emptyErrorParamsSchema
+    }), z.object({
+        "code": z.literal("workflow_node_output_changed"),
         "params": emptyErrorParamsSchema
     })]);
