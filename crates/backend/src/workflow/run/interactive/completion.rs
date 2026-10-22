@@ -5,42 +5,45 @@
 //! engine commit are done by the caller around [`prepare_completion`].
 
 use super::super::completion_snapshot::{
-    completion_final_text, completion_payload, derive_completion_snapshot,
-    parse_completion_snapshot, unknown_completion_snapshot,
+    CompletionBlocker, CompletionBlockerKind, CompletionSnapshot, completion_final_text,
+    completion_payload, derive_completion_snapshot, forced_completion_audit,
+    parse_completion_snapshot, trailing_assistant_text, unknown_completion_snapshot,
 };
 use super::super::executor::apply_output_contract;
 use super::super::worktree::{capture_worktree_snapshot, compute_file_changes};
 use super::CompletingNodeRuns;
-use crate::agent_runtime::AgentRuntimeManager;
 use crate::error::{BackendError, ErrorClassification};
 use crate::git_cleanup::KeyedResourceLocks;
-#[cfg(test)]
-use agent_client_protocol_schema::v1::StopReason;
-use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
 use ora_application::{
     ApplicationError, Clock, FileChange, WorkflowGraph, WorkflowRunEngineRepository,
 };
-use ora_contracts::{EmptyErrorParams, PublicError};
+use ora_contracts::{
+    PublicError, WorkflowNodeCompletionBlocker, WorkflowNodeCompletionBlockerKind,
+    WorkflowNodeIncompleteParams, WorkflowNodeOutputChangedParams, WorkflowNodeTurnChangedParams,
+    WorkflowNodeTurnKey,
+};
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
 use ora_domain::{
-    SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunId, WorkflowRunStatus,
+    SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunId, WorkflowRunStatus, WorkspaceId,
 };
-use ora_history::{HistoryRecord, SessionHistory, read_session_history};
+use ora_history::read_session_history;
 use ora_logging::ora_warn;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 /// The assembled result of validating and preparing one interactive node completion.
+#[derive(Debug)]
 pub(crate) struct PreparedCompletion {
     pub node_run_id: WorkflowNodeRunId,
     pub output: Option<String>,
     pub structured_output: Option<serde_json::Value>,
     pub stop_reason: Option<String>,
-    pub file_changes: Vec<FileChange>,
     pub session_id: Option<SessionId>,
-    /// Whether the human explicitly forced the completion; the caller records the audit.
-    pub forced: bool,
+    /// The run's workspace, resolved by the caller because only it owns the runtime directory port.
+    pub workspace_id: WorkspaceId,
+    /// The payload keys a forced completion must commit with the completion itself.
+    pub audit: Option<serde_json::Value>,
 }
 
 /// Atomically claims an awaiting interactive node for manual completion under the per-run gate.
@@ -108,7 +111,7 @@ pub(crate) fn revalidate_completion(
 ) -> Result<(), BackendError> {
     let repository = SqliteWorkflowRunEngineRepository::new(pool.clone());
     // Read the node first so every rejection path can name the graph node id, not the node-run id,
-    // in the error — consistent with the prompt-policy rejections.
+    // in the error 閳?consistent with the prompt-policy rejections.
     let node_run = repository
         .find_node_run_by_id(node_run_id)
         .map_err(repository_error)?
@@ -138,14 +141,15 @@ pub(crate) fn revalidate_completion(
 
 /// Validates an interactive node and assembles its completion output from persisted state.
 ///
-/// The run must be `Running`, the node must be awaiting input (`Pending`) and interactive, and
-/// the final assistant output is read from the session's durable history. Intended to run in a
-/// blocking closure so the async runtime is not held.
+/// The run must be `Running`, the node must be awaiting input (`Pending`) and interactive. The
+/// final assistant output and the turn identity are read from the session's durable history, and
+/// the node's completion snapshot is the authority for the blockers gate: a node that parked
+/// before snapshots existed is materialized once from the same derivation, so it passes through
+/// exactly the same gate as a new node instead of bypassing it. Intended to run in a blocking
+/// closure so the async runtime is not held.
 pub(crate) fn prepare_completion(
     pool: &RepositoryPool,
     sessions_root: &Path,
-    baselines_root: &Path,
-    agent_runtime: &AgentRuntimeManager,
     run_id: &WorkflowRunId,
     node_id: &str,
     force: bool,
@@ -193,155 +197,194 @@ pub(crate) fn prepare_completion(
     }
     let output_contract = agent_config.and_then(|config| config.output_contract.as_ref());
     let stored = parse_completion_snapshot(node_run.payload.as_deref());
-    let has_stored_snapshot = stored.is_some();
-    let (raw_output, derived) = match node_run.session_id.as_ref() {
+    let (history, derived) = match node_run.session_id.as_ref() {
         Some(session_id) => {
             let history = read_session_history(sessions_root, session_id.as_ref())
                 .map_err(|error| BackendError::internal("failed to read session history", error))?;
-            let final_text = completion_final_text(&history);
-            // Pre-snapshot nodes keep the legacy "last assistant message" fallback; a node that
-            // parked with a snapshot uses only the contract window.
-            let output = if has_stored_snapshot {
-                final_text
-            } else {
-                final_text.or_else(|| assistant_output_from_history(&history))
-            };
-            (
-                output,
-                derive_completion_snapshot(&history, output_contract, false),
-            )
+            let derived = derive_completion_snapshot(&history, output_contract, false);
+            (Some(history), derived)
         }
         None => (None, unknown_completion_snapshot(false)),
     };
-    let stored = match stored {
-        // A provisional snapshot written before the actor settled is repaired once `prepare`
-        // observes the settled turn; the write is payload-only and keeps the node Pending.
-        Some(stored) if stored.provisional && derived.turn_key.is_some() => {
-            let patch = completion_payload(&derived);
-            if let Err(error) = repository.merge_node_payload(
-                &node_run.id,
-                &patch,
-                crate::clock::SystemClock.now_timestamp_millis(),
-            ) {
-                ora_warn!(
-                    node_run_id = %node_run.id,
-                    error = %error,
-                    "failed to repair a provisional completion snapshot"
-                );
-            }
-            Some(derived.clone())
-        }
-        other => other,
-    };
-    if let Some(stored) = &stored {
-        if stored.turn_key.is_some() && stored.turn_key != derived.turn_key {
-            return Err(completion_rejected(PublicError::WorkflowNodeTurnChanged(
-                EmptyErrorParams {},
-            )));
-        }
-        if stored.output_digest.is_some() && stored.output_digest != derived.output_digest {
-            return Err(completion_rejected(PublicError::WorkflowNodeOutputChanged(
-                EmptyErrorParams {},
-            )));
-        }
+    // The conflicts are decided against the freshly derived turn, before any repair write: a stale
+    // completion must be told what changed even when the stored snapshot itself is still coherent.
+    if let Some(expected) = stored.as_ref().and_then(|stored| stored.turn_key)
+        && derived.turn_key != Some(expected)
+    {
+        return Err(completion_rejected(PublicError::WorkflowNodeTurnChanged(
+            WorkflowNodeTurnChangedParams {
+                node_id: node_run.node_id.clone(),
+                expected: Some(to_contract_turn_key(expected)),
+                actual: derived.turn_key.map(to_contract_turn_key),
+            },
+        )));
     }
-    let snapshot = stored.unwrap_or(derived);
-    // Legacy `Pending` nodes predate the snapshot. They keep the old completion behavior until
-    // `prepare` materializes them; only a node that parked with a snapshot is gated here.
-    if has_stored_snapshot && !force && !snapshot.blockers.is_empty() {
+    if let Some(expected) = stored
+        .as_ref()
+        .and_then(|stored| stored.output_digest.as_deref())
+        && Some(expected) != derived.output_digest.as_deref()
+    {
+        return Err(completion_rejected(PublicError::WorkflowNodeOutputChanged(
+            WorkflowNodeOutputChangedParams {
+                node_id: node_run.node_id.clone(),
+                expected: Some(expected.to_string()),
+                actual: derived.output_digest,
+            },
+        )));
+    }
+    let snapshot = settle_snapshot(&repository, &node_run.id, stored.as_ref(), derived);
+    if !force && !snapshot.blockers.is_empty() {
         return Err(completion_rejected(PublicError::WorkflowNodeIncomplete(
-            EmptyErrorParams {},
+            WorkflowNodeIncompleteParams {
+                node_id: node_run.node_id.clone(),
+                blockers: snapshot.blockers.iter().map(to_contract_blocker).collect(),
+            },
         )));
     }
     let stop_reason = snapshot.stop_reason.clone();
+    // A forced completion without a settled turn takes the last assistant reply as its output and
+    // never claims a structured output; a settled turn always uses its own contract window.
+    let raw_output = match (&history, snapshot.turn_key) {
+        (Some(history), Some(_)) => completion_final_text(history),
+        (Some(history), None) if force => trailing_assistant_text(history),
+        _ => None,
+    };
     let (output, structured_output) =
         match apply_output_contract(output_contract, raw_output.clone(), &node_run.node_id) {
             Ok(output) => output,
             Err(_) if force => (raw_output, None),
             Err(_) => {
                 return Err(completion_rejected(PublicError::WorkflowNodeIncomplete(
-                    EmptyErrorParams {},
+                    WorkflowNodeIncompleteParams {
+                        node_id: node_run.node_id.clone(),
+                        blockers: snapshot.blockers.iter().map(to_contract_blocker).collect(),
+                    },
                 )));
             }
         };
-
-    if !has_stored_snapshot {
-        let patch = completion_payload(&snapshot);
-        if let Err(error) = repository.merge_node_payload(
-            &node_run.id,
-            &patch,
-            crate::clock::SystemClock.now_timestamp_millis(),
-        ) {
-            ora_warn!(
-                node_run_id = %node_run.id,
-                error = %error,
-                "failed to materialize a completion snapshot for a legacy awaiting node"
-            );
-        }
-    }
-
-    let file_changes = match load_worktree_baseline(baselines_root, &node_run.id) {
-        Some(baseline) => {
-            let worktree_root = agent_runtime.workspace_cwd(&context.workspace.id)?;
-            compute_file_changes(
-                Some(&baseline),
-                capture_worktree_snapshot(&worktree_root).as_ref(),
-            )
-        }
-        None => {
-            // A missing baseline means the node's changes cannot be attributed; reporting an
-            // empty diff is safer than claiming the whole tree changed (D9/E5).
-            ora_warn!(
-                node_run_id = %node_run.id,
-                "completing interactive node without a persisted worktree baseline; reporting no file changes"
-            );
-            Vec::new()
-        }
-    };
 
     Ok(PreparedCompletion {
         node_run_id: node_run.id,
         output,
         structured_output,
         stop_reason,
-        file_changes,
         session_id: node_run.session_id,
-        forced: force,
+        workspace_id: context.workspace.id,
+        audit: force.then(|| forced_completion_audit(&snapshot)),
     })
 }
 
-/// Returns the final settled assistant message from a session's durable history.
-fn assistant_output_from_history(history: &SessionHistory) -> Option<String> {
-    history.lines.iter().rev().find_map(|line| {
-        let HistoryRecord::Update { update, .. } = &line.record else {
-            return None;
-        };
-        assistant_text(update.as_ref()).map(str::to_string)
-    })
-}
-
-/// Returns the stop reason of the last settled turn, which is why the interactive node parked
-/// awaiting input rather than completing automatically.
-#[cfg(test)]
-fn last_stop_reason(history: &SessionHistory) -> Option<StopReason> {
-    history.lines.iter().rev().find_map(|line| {
-        let HistoryRecord::TurnEnded { stop_reason } = &line.record else {
-            return None;
-        };
-        Some(*stop_reason)
-    })
-}
-
-/// Extracts text from one settled assistant message update.
-fn assistant_text(update: &SessionUpdate) -> Option<&str> {
-    let content = match update {
-        SessionUpdate::AgentMessageChunk(chunk) => &chunk.content,
-        _ => return None,
+/// Returns the snapshot the gate must apply, repairing or materializing it first when needed.
+///
+/// Two upgrade paths write the derived snapshot back as a payload-only guarded `Pending` update:
+/// a provisional snapshot written before the actor settled, and a node that parked before
+/// snapshots existed (no `payload.completion` at all). Both are re-derived only while the stored
+/// snapshot still lacks a turn identity, and a repair is only accepted when it describes the same
+/// user message, so a later turn can never be substituted for the one the user acted on.
+fn settle_snapshot(
+    repository: &SqliteWorkflowRunEngineRepository,
+    node_run_id: &WorkflowNodeRunId,
+    stored: Option<&CompletionSnapshot>,
+    derived: CompletionSnapshot,
+) -> CompletionSnapshot {
+    let Some(stored) = stored else {
+        // Upgrade path: the node parked before snapshots existed. Materialize once so the
+        // blockers gate below applies to it exactly as it does to a new node.
+        return persist_derived_snapshot(repository, node_run_id, derived);
     };
-    let ContentBlock::Text(text) = content else {
-        return None;
+    if derived.turn_key.is_none() {
+        // Nothing settled yet, so there is nothing to repair with; keep the stored snapshot.
+        return stored.clone();
+    }
+    let same_user_message = match (stored.user_seq, derived.user_seq) {
+        // A snapshot with no `userSeq` could not read history at park time, so there is no
+        // identity to contradict and the repaired turn is the best available description.
+        (None, _) | (_, None) => true,
+        (Some(stored_seq), Some(derived_seq)) => stored_seq == derived_seq,
     };
-    Some(&text.text)
+    // A snapshot that already has a turn identity is not provisional in practice: it settled.
+    if !same_user_message || (stored.turn_key.is_some() && !stored.provisional) {
+        return stored.clone();
+    }
+    persist_derived_snapshot(repository, node_run_id, derived)
+}
+
+/// Writes the derived snapshot back and returns it, logging instead of failing on a lost guard.
+///
+/// The `Pending` guard is what keeps this safe outside the per-run gate: a completion or cancel
+/// that already committed leaves the row outside `Pending`, so the stale snapshot is dropped.
+fn persist_derived_snapshot(
+    repository: &SqliteWorkflowRunEngineRepository,
+    node_run_id: &WorkflowNodeRunId,
+    derived: CompletionSnapshot,
+) -> CompletionSnapshot {
+    let patch = completion_payload(&derived);
+    if let Err(error) = repository.repair_node_payload(
+        node_run_id,
+        &patch,
+        crate::clock::SystemClock.now_timestamp_millis(),
+    ) {
+        ora_warn!(
+            node_run_id = %node_run_id,
+            error = %error,
+            "failed to persist a completion snapshot while preparing a completion"
+        );
+    }
+    derived
+}
+
+/// Maps one persisted blocker onto the contract shape carried by the rejection.
+fn to_contract_blocker(blocker: &CompletionBlocker) -> WorkflowNodeCompletionBlocker {
+    let kind = match blocker.kind {
+        CompletionBlockerKind::TurnStopped => WorkflowNodeCompletionBlockerKind::TurnStopped,
+        CompletionBlockerKind::TurnTruncated => WorkflowNodeCompletionBlockerKind::TurnTruncated,
+        CompletionBlockerKind::TurnRefused => WorkflowNodeCompletionBlockerKind::TurnRefused,
+        CompletionBlockerKind::TurnUnknown => WorkflowNodeCompletionBlockerKind::TurnUnknown,
+        CompletionBlockerKind::StructuredInvalid => {
+            WorkflowNodeCompletionBlockerKind::StructuredInvalid
+        }
+        CompletionBlockerKind::OutputMissing => WorkflowNodeCompletionBlockerKind::OutputMissing,
+    };
+    WorkflowNodeCompletionBlocker {
+        kind,
+        message: blocker
+            .params
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// Maps one persisted turn key onto the contract shape carried by a conflict.
+fn to_contract_turn_key(key: super::super::completion_snapshot::TurnKey) -> WorkflowNodeTurnKey {
+    WorkflowNodeTurnKey {
+        user_seq: key.user_seq,
+        ended_seq: key.ended_seq,
+    }
+}
+
+/// Computes the node's own file changes from its persisted baseline and the live worktree.
+///
+/// A missing baseline means the node's changes cannot be attributed; reporting an empty diff is
+/// safer than claiming the whole tree changed (ADR D9/E5).
+pub(crate) fn completion_file_changes(
+    baselines_root: &Path,
+    node_run_id: &WorkflowNodeRunId,
+    worktree_root: &Path,
+) -> Vec<FileChange> {
+    match load_worktree_baseline(baselines_root, node_run_id) {
+        Some(baseline) => compute_file_changes(
+            Some(&baseline),
+            capture_worktree_snapshot(worktree_root).as_ref(),
+        ),
+        None => {
+            ora_warn!(
+                node_run_id = %node_run_id,
+                "completing interactive node without a persisted worktree baseline; reporting no file changes"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Loads the worktree baseline persisted when an interactive node started, or `None` when the
@@ -367,100 +410,4 @@ fn completion_rejected(public: PublicError) -> BackendError {
         public,
         "interactive completion rejected by its completion snapshot",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{assistant_output_from_history, last_stop_reason};
-    use agent_client_protocol_schema::v1::{
-        ContentBlock, ContentChunk, SessionUpdate, StopReason, TextContent,
-    };
-    use ora_domain::AgentRef;
-    use ora_history::{HistoryIntegrity, HistoryLine, HistoryRecord, SessionHistory, SessionMeta};
-    use pretty_assertions::assert_eq;
-
-    fn turn_ended(stop_reason: StopReason) -> HistoryLine {
-        HistoryLine::new(
-            "2026-08-18T00:00:00+08:00",
-            0,
-            HistoryRecord::TurnEnded { stop_reason },
-        )
-    }
-
-    fn text_update(role: &str, text: &str) -> HistoryLine {
-        let update = match role {
-            "user" => SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                TextContent::new(text.to_string()),
-            ))),
-            _ => SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                TextContent::new(text.to_string()),
-            ))),
-        };
-        HistoryLine::new(
-            "2026-08-18T00:00:00+08:00",
-            0,
-            HistoryRecord::Update {
-                update: Box::new(update),
-                tool_timing: None,
-            },
-        )
-    }
-
-    fn history(lines: Vec<HistoryLine>) -> SessionHistory {
-        let next_seq = lines.len() as u32;
-        SessionHistory {
-            lines,
-            next_seq,
-            integrity: HistoryIntegrity::Complete,
-        }
-    }
-
-    /// A multi-turn interactive node persists only its final assistant message as node output.
-    #[test]
-    fn assistant_output_from_history_returns_the_final_assistant_message() {
-        let history = history(vec![
-            text_update("user", "review the plan"),
-            text_update("assistant", "here is v1"),
-            text_update("user", "keep section two"),
-            text_update("assistant", "v1 is final"),
-        ]);
-        assert_eq!(
-            assistant_output_from_history(&history),
-            Some("v1 is final".to_string())
-        );
-    }
-
-    /// Non-message and user-only history yields no assistant node output.
-    #[test]
-    fn assistant_output_from_history_skips_non_assistant_records() {
-        let meta = HistoryLine::new(
-            "2026-08-18T00:00:00+08:00",
-            0,
-            HistoryRecord::Meta(SessionMeta {
-                schema_version: 1,
-                session_id: "session-1".to_string(),
-                workspace_id: "workspace-1".to_string(),
-                agent_ref: AgentRef::parse("ora-space.nga").expect("agent identity"),
-                agent_session_id: "provider-1".to_string(),
-                cwd: std::path::PathBuf::from("."),
-            }),
-        );
-        assert_eq!(
-            assistant_output_from_history(&history(vec![
-                meta,
-                text_update("user", "still working"),
-            ])),
-            None
-        );
-    }
-
-    /// The stop reason of the last settled turn is what parked the interactive node awaiting input.
-    #[test]
-    fn last_stop_reason_returns_the_final_turn_stop_reason() {
-        assert_eq!(
-            last_stop_reason(&history(vec![turn_ended(StopReason::MaxTokens)])),
-            Some(StopReason::MaxTokens)
-        );
-        assert_eq!(last_stop_reason(&history(vec![])), None);
-    }
 }

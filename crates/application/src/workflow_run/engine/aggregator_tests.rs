@@ -438,6 +438,7 @@ impl WorkflowRunEngineRepository for Harness {
         _structured_output: Option<Value>,
         _stop_reason: Option<String>,
         _file_changes: Vec<FileChange>,
+        _payload_patch: Option<&Value>,
         _now: i64,
     ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
         let (node_id, node_type) = {

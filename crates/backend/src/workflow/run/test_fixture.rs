@@ -452,9 +452,19 @@ pub(crate) fn recording_transitions(
     pool: &RepositoryPool,
 ) -> (Arc<WorkflowRunTransitions>, Arc<RecordingInvalidations>) {
     let recording = Arc::new(RecordingInvalidations::default());
-    let transitions = Arc::new(WorkflowRunTransitions::new(pool.clone(), recording.clone()));
+    let transitions = Arc::new(WorkflowRunTransitions::new(
+        pool.clone(),
+        recording.clone(),
+        KeyedResourceLocks::new(),
+    ));
     (transitions, recording)
 }
+
+/// A single interactive agent node, which parks awaiting input instead of completing its turn.
+pub(crate) const INTERACTIVE_AGENT_GRAPH: &str = r#"{"nodes":[
+    {"id":"start","data":{"kind":"start"}},
+    {"id":"agent","data":{"kind":"agent","agentConfig":{"retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":0},"executor":{"agentCli":"open_code","modelId":"m"},"prompt":"do","interactive":true}}}
+],"edges":[{"source":"start","target":"agent"}]}"#;
 
 /// Keeps bootstrap and every emitting operation under the same scoped TRACE subscriber.
 pub(crate) fn run_test(test: impl std::future::Future<Output = ()>) {

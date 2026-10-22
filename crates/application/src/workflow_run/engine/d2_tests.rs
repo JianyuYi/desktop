@@ -251,6 +251,7 @@ impl WorkflowRunEngineRepository for InMemoryRepository {
         _structured_output: Option<serde_json::Value>,
         _stop_reason: Option<String>,
         _file_changes: Vec<FileChange>,
+        _payload_patch: Option<&serde_json::Value>,
         _now: i64,
     ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
         let mut state = self.lock();

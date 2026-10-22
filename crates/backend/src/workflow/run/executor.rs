@@ -27,7 +27,7 @@ use ora_contracts::{
     StopSessionRequest,
 };
 use ora_db::{RepositoryPool, SqliteAgentDefinitionRepository, SqliteWorkflowRunEngineRepository};
-use ora_domain::{AgentDefinitionId, Namespace, SessionId, WorkflowNodeRunId};
+use ora_domain::{AgentDefinitionId, Namespace, SessionId, WorkflowNodeRunId, WorkflowRunId};
 use ora_history::read_session_history;
 use ora_logging::ora_warn;
 
@@ -325,12 +325,47 @@ impl NodeExecutionError {
     }
 }
 
-/// Whether a settled turn should park an interactive node at `Pending`.
+/// Drives one interactive node's first-turn park off the async runtime.
 ///
-/// Every interactive turn parks, including `Refusal` and unknown terminal reasons: the snapshot
-/// records the blocker, while non-interactive nodes keep their existing failure behavior.
-fn pauses_interactive_node(interactive: bool) -> bool {
-    interactive
+/// Both halves of the park are blocking work: reading the whole session history is file I/O, and
+/// the transition sink takes the per-run gate, which is a blocking lock. Running them on a
+/// blocking worker keeps a long conversation from occupying a tokio worker and matches how the
+/// human-turn cleanup performs the same park. The snapshot is derived before the gate is taken,
+/// so no lock is held across the history read (ADR D3 steps 1 and 4).
+async fn park_first_interactive_turn(
+    transitions: Arc<WorkflowRunTransitions>,
+    sessions_root: PathBuf,
+    run_id: WorkflowRunId,
+    node_run_id: WorkflowNodeRunId,
+    session_id: SessionId,
+    output_contract: Option<AgentOutputContract>,
+) -> Result<(), NodeExecutionError> {
+    tokio::task::spawn_blocking(move || {        let snapshot = match read_session_history(&sessions_root, session_id.as_ref()) {
+            Ok(history) => derive_completion_snapshot(&history, output_contract.as_ref(), false),
+            Err(error) => {
+                ora_warn!(
+                    node_run_id = %node_run_id,
+                    error = %error,
+                    "failed to read session history while parking; recording an unknown completion snapshot"
+                );
+                unknown_completion_snapshot(false)
+            }
+        };
+        transitions
+            .park_node_run(
+                &run_id,
+                &node_run_id,
+                &completion_payload(&snapshot),
+            )
+            .map_err(NodeExecutionError::from)
+    })
+    .await
+    .map_err(|source| {
+        NodeExecutionError::Repository(RepositoryError::from_message(format!(
+            "interactive park did not complete: {source}"
+        )))
+    })?
+    .map(|_advanced| ())
 }
 
 /// Runs the start → prompt → stop session chain for one agent node.
@@ -342,7 +377,7 @@ async fn drive_agent_node(
     clock: &SystemClock,
     sessions_root: &Path,
     baselines_root: &Path,
-    transitions: &WorkflowRunTransitions,
+    transitions: &Arc<WorkflowRunTransitions>,
     node_run_id: &WorkflowNodeRunId,
     node: &WorkflowGraphNode,
     graph: &ora_application::WorkflowGraph,
@@ -538,7 +573,7 @@ async fn drive_agent_node(
         // A baseline is execution provenance, not a prerequisite, so a missing
         // (oversized/unavailable) baseline or a failed write still parks the node; its completion
         // later reports no file changes rather than failing the run.
-        if pauses_interactive_node(config.interactive) {
+        if config.interactive {
             if let Some(baseline) = baseline.as_ref()
                 && let Err(error) = persist_worktree_baseline(baselines_root, node_run_id, baseline)
             {
@@ -546,20 +581,15 @@ async fn drive_agent_node(
             }
             // The snapshot and the guarded status flip commit together so a `Pending` row always
             // has the completion facts the read projection parses.
-            let snapshot = match read_session_history(sessions_root, session_id.as_ref()) {
-                Ok(history) => {
-                    derive_completion_snapshot(&history, config.output_contract.as_ref(), false)
-                }
-                Err(error) => {
-                    ora_warn!(
-                        node_run_id = %node_run_id,
-                        error = %error,
-                        "failed to read session history while parking; recording an unknown completion snapshot"
-                    );
-                    unknown_completion_snapshot(false)
-                }
-            };
-            transitions.park_node_run(node_run_id, &completion_payload(&snapshot))?;
+            park_first_interactive_turn(
+                transitions.clone(),
+                sessions_root.to_path_buf(),
+                context.run.id.clone(),
+                node_run_id.clone(),
+                session_id.clone(),
+                config.output_contract.clone(),
+            )
+            .await?;
             return Ok(AgentNodeOutcome::AwaitingInput);
         }
 
@@ -791,13 +821,6 @@ mod tests {
             SessionConfigValueId::new(value.to_string()),
             name.to_string(),
         )
-    }
-
-    /// Verifies every interactive turn parks, while non-interactive nodes keep the default path.
-    #[test]
-    fn pauses_interactive_node_parks_every_interactive_turn() {
-        assert!(pauses_interactive_node(true));
-        assert!(!pauses_interactive_node(false));
     }
 
     fn model_option(options: Vec<SessionConfigSelectOption>) -> SessionConfigOption {

@@ -194,24 +194,31 @@ impl WorkflowRuns {
         };
 
         // Prepare the final output and diff outside the gate; on failure release the claim so the
-        // node returns to its awaitable state.
-        let prepared = {
+        // node returns to its awaitable state. The worktree diff needs the runtime's workspace
+        // directory, so it is resolved here on the same blocking worker as the prepare itself.
+        let (prepared, file_changes) = {
             let pool = self.pool.clone();
             let sessions_root = self.sessions_root.clone();
             let baselines_root = self.baselines_root.clone();
             let agent_runtime = self.agent_runtime.clone();
             let run_id = run_id.clone();
             let node_id = node_id.clone();
+            let force = request.force;
             match spawn_repository_work(move || {
-                crate::workflow::run::interactive::prepare_completion(
+                let prepared = crate::workflow::run::interactive::prepare_completion(
                     &pool,
                     &sessions_root,
-                    &baselines_root,
-                    &agent_runtime,
                     &run_id,
                     &node_id,
-                    request.force,
-                )
+                    force,
+                )?;
+                let worktree_root = agent_runtime.workspace_cwd(&prepared.workspace_id)?;
+                let file_changes = crate::workflow::run::interactive::completion_file_changes(
+                    &baselines_root,
+                    &prepared.node_run_id,
+                    &worktree_root,
+                );
+                Ok((prepared, file_changes))
             })
             .await
             {
@@ -226,6 +233,8 @@ impl WorkflowRuns {
         // Commit the node completion under the gate and release the claim in the same critical
         // section, so a prompt cannot slip in between the commit and the release. Revalidate first:
         // a cancel that won during prepare must abort this completion rather than report success.
+        // A forced completion merges its audit in that same transaction, so a committed node always
+        // carries the record of how it was completed (ADR D5).
         let pool = self.pool.clone();
         let engine = self.engine.clone();
         let run_locks = self.run_locks.clone();
@@ -234,8 +243,7 @@ impl WorkflowRuns {
         let output = prepared.output.clone();
         let structured_output = prepared.structured_output.clone();
         let stop_reason = prepared.stop_reason.clone();
-        let file_changes = prepared.file_changes.clone();
-        let forced = prepared.forced;
+        let audit = prepared.audit.clone();
         let response = spawn_repository_work(move || {
             let _gate = run_locks.acquire_exclusive(run_id.as_ref());
             let result = crate::workflow::run::interactive::revalidate_completion(
@@ -244,31 +252,17 @@ impl WorkflowRuns {
                 &node_run_id,
             )
             .and_then(|()| {
-                let response = engine
-                    .complete_node(
+                engine
+                    .complete_node_with_payload_patch(
                         &run_id,
                         &node_run_id,
                         output,
                         structured_output,
                         stop_reason,
                         file_changes,
+                        audit,
                     )
-                    .map_err(BackendError::from)?;
-                if forced {
-                    let repository = ora_db::SqliteWorkflowRunEngineRepository::new(pool.clone());
-                    if let Err(error) = repository.merge_node_payload(
-                        &node_run_id,
-                        &serde_json::json!({ "completionForced": { "forced": true } }),
-                        crate::clock::SystemClock.now_timestamp_millis(),
-                    ) {
-                        ora_warn!(
-                            node_run_id = %node_run_id,
-                            error = %error,
-                            "completed a forced node but failed to record its completion audit"
-                        );
-                    }
-                }
-                Ok(response)
+                    .map_err(BackendError::from)
             });
             completing
                 .lock()

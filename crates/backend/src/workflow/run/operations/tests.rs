@@ -2,10 +2,9 @@ use super::WorkflowRuns;
 use crate::git_cleanup::KeyedResourceLocks;
 use crate::workflow::run::test_fixture::{
     AGENT_GRAPH, RecordingExecutor, bind_and_park, bootstrap, run_test, started_run,
-    started_run_with,
+    started_run_with, write_open_turn, write_settled_turn,
 };
 use crate::{Backend, test_backend::backend_paths};
-use agent_client_protocol_schema::v1::{ContentBlock, ContentChunk, SessionUpdate, TextContent};
 use ora_application::{
     NodeFailure, NodeFailureKind, ResumeWorkflowRunResult, SessionRepository,
     WorkflowRunEngineRepository, WorkflowRunRepository,
@@ -15,7 +14,7 @@ use ora_db::{
     SqliteSessionRepository, SqliteWorkflowRunEngineRepository, SqliteWorkflowRunRepository,
 };
 use ora_domain::{SessionId, WorkflowNodeRunId};
-use ora_history::{HistoryLine, HistoryRecord, history_path};
+use ora_history::history_path;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::sync::Arc;
@@ -62,6 +61,11 @@ impl Fixture {
             })
             .expect("run detail")
     }
+
+    /// Writes one settled turn so the completion gate sees a finished turn for the bound session.
+    fn settle_turn(&self) {
+        write_settled_turn(&self.runs.sessions_root, "session-1", "go", "Final answer");
+    }
 }
 
 /// Concurrent public completions commit once, retain the final assistant output, and clean up
@@ -70,23 +74,7 @@ impl Fixture {
 fn concurrent_completions_commit_once_and_leave_the_session_read_only() {
     run_test(async {
         let fixture = Fixture::awaiting();
-        let history = history_path(&fixture.runs.sessions_root, "session-1").expect("history path");
-        fs::create_dir_all(history.parent().expect("history parent")).expect("history directory");
-        let line = HistoryLine::new(
-            "2026-09-06T12:00:00+08:00",
-            0,
-            HistoryRecord::Update {
-                update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                    ContentBlock::Text(TextContent::new("Final answer".to_string())),
-                ))),
-                tool_timing: None,
-            },
-        );
-        fs::write(
-            &history,
-            format!("{}\n", serde_json::to_string(&line).expect("history JSON")),
-        )
-        .expect("settled history");
+        fixture.settle_turn();
         fs::create_dir_all(&fixture.runs.baselines_root).expect("baseline directory");
         let baseline = fixture
             .runs
@@ -174,12 +162,86 @@ fn prepare_failure_releases_the_claim_for_retry() {
         assert_eq!(error.classification(), crate::ErrorClassification::Internal);
         assert_eq!(fixture.detail(), before);
         fs::remove_dir(&history).expect("repair fixture history path");
+        fixture.settle_turn();
         let completed = fixture
             .runs
             .complete_node(request)
             .await
             .expect("claim released for retry");
         assert_eq!(completed.run.status, WorkflowRunStatus::Succeeded);
+    });
+}
+
+/// A turn that never settled is rejected with the blocker the user has to resolve.
+#[test]
+fn an_unsettled_completion_is_rejected_with_its_blockers() {
+    run_test(async {
+        let fixture = Fixture::awaiting();
+        write_open_turn(&fixture.runs.sessions_root, "session-1", "go", "draft only");
+        let error = fixture
+            .runs
+            .complete_node(CompleteWorkflowNodeRequest {
+                run_id: "run-1".to_string(),
+                node_id: "agent".to_string(),
+                force: false,
+                requester: Some(NodeCompletionRequester::Human),
+            })
+            .await
+            .expect_err("an unsettled turn cannot complete without force");
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeIncomplete(WorkflowNodeIncompleteParams {
+                node_id: "agent".to_string(),
+                blockers: vec![WorkflowNodeCompletionBlocker {
+                    kind: WorkflowNodeCompletionBlockerKind::TurnUnknown,
+                    message: None,
+                }],
+            })
+        );
+        // The rejected completion left the node awaiting input and recorded no audit.
+        assert_eq!(
+            fixture.detail().run.status,
+            WorkflowRunStatus::AwaitingInput
+        );
+    });
+}
+
+/// A forced completion commits its audit in the same payload as the completion.
+#[test]
+fn a_forced_completion_records_its_audit_in_the_completed_payload() {
+    run_test(async {
+        let fixture = Fixture::awaiting();
+        write_open_turn(&fixture.runs.sessions_root, "session-1", "go", "draft only");
+        let response = fixture
+            .runs
+            .complete_node(CompleteWorkflowNodeRequest {
+                run_id: "run-1".to_string(),
+                node_id: "agent".to_string(),
+                force: true,
+                requester: Some(NodeCompletionRequester::Human),
+            })
+            .await
+            .expect("a forced completion commits");
+        assert_eq!(response.run.status, WorkflowRunStatus::Succeeded);
+
+        let node = SqliteWorkflowRunRepository::new(fixture.runs.pool.clone())
+            .list_node_runs(&ora_domain::WorkflowRunId::new("run-1"))
+            .expect("node runs")
+            .into_iter()
+            .find(|node| node.node_id == "agent")
+            .expect("agent node");
+        assert_eq!(node.output.as_deref(), Some("draft only"));
+        let payload: serde_json::Value =
+            serde_json::from_str(node.payload.as_deref().expect("payload")).expect("payload JSON");
+        assert_eq!(
+            payload["completion_forced"],
+            serde_json::json!({
+                "blockers": [{ "kind": "turn_unknown" }],
+                "without_turn": true,
+                "output_source": "last_assistant_message",
+            }),
+            "the forced audit is part of the completion payload, not a later write"
+        );
     });
 }
 
@@ -208,6 +270,7 @@ fn failed_prompt_start_restores_the_awaiting_node_before_returning() {
             fixture.detail().run.status,
             WorkflowRunStatus::AwaitingInput
         );
+        fixture.settle_turn();
         let completed = fixture
             .runs
             .complete_node(CompleteWorkflowNodeRequest {
@@ -312,6 +375,7 @@ fn recovery_preserves_awaiting_nodes_and_prunes_orphaned_baselines() {
 fn concurrent_cancel_and_complete_report_the_committed_outcome() {
     run_test(async {
         let fixture = Fixture::awaiting();
+        fixture.settle_turn();
         let (cancelled, completed) = tokio::join!(
             fixture.runs.cancel(CancelWorkflowRunRequest {
                 run_id: "run-1".to_string()

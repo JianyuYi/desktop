@@ -94,8 +94,9 @@ fn cleanup_polls_until_the_turn_ended_is_durable() {
 
 /// A turn that never writes `TurnEnded` parks provisionally instead of stranding the node.
 ///
-/// The provisional snapshot records that the output is unknown, so the node leaves `Running` and
-/// a later completion can repair the snapshot from history (or be explicitly forced).
+/// The provisional snapshot keeps the `userSeq` of the turn it describes and names the reason the
+/// turn did not settle, so a later completion can repair it from history by that identity (or the
+/// user can explicitly force it) instead of being told the history was unavailable.
 #[test]
 fn cleanup_parks_provisionally_when_the_turn_never_ends() {
     run_test(async {
@@ -129,14 +130,14 @@ fn cleanup_parks_provisionally_when_the_turn_never_ends() {
         assert_eq!(
             parse_completion_snapshot(parked.payload.as_deref()),
             Some(CompletionSnapshot {
-                user_seq: None,
+                user_seq: Some(0),
                 turn_key: None,
                 stop_reason: None,
                 blockers: vec![CompletionBlocker {
                     kind: CompletionBlockerKind::TurnUnknown,
                     params: Value::Null,
                 }],
-                warnings: vec!["history_unavailable".to_string()],
+                warnings: vec!["turn_not_settled".to_string()],
                 output_digest: None,
                 provisional: true,
             })

@@ -40,20 +40,28 @@ fn every_human_turn_uses_the_frozen_policy_after_a_draft_edit() {
         let (transitions, recording) = recording_transitions(&pool);
 
         for _ in 0..2 {
-            assert_eq!(
-                begin_human_turn(
-                    &pool,
-                    &run_locks,
-                    &completing,
-                    &transitions,
-                    session_id.as_ref()
-                )
-                .await
-                .unwrap(),
-                HumanTurnAdmission::Workflow {
-                    node_run_id: node_run_id.clone(),
-                    prompt_inactivity: PromptInactivityPolicy::Wait,
-                },
+            let admission = begin_human_turn(
+                &pool,
+                &run_locks,
+                &completing,
+                &transitions,
+                session_id.as_ref(),
+            )
+            .await
+            .unwrap();
+            let HumanTurnAdmission::Workflow {
+                node_run_id: admitted,
+                prompt_inactivity,
+                step_boundary,
+            } = &admission
+            else {
+                panic!("a bound interactive session must be admitted as a workflow turn");
+            };
+            assert_eq!(admitted, &node_run_id);
+            assert_eq!(*prompt_inactivity, PromptInactivityPolicy::Wait);
+            assert!(
+                step_boundary.starts_with("<workflow_step_boundary>"),
+                "every human turn carries the step boundary"
             );
             end_human_turn(&pool, &sessions_root, &transitions, &node_run_id)
                 .await

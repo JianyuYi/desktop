@@ -206,6 +206,7 @@ fn advances_loop_rounds_without_exposing_partial_child_state() {
                     None,
                     None,
                     vec![],
+                    /*payload_patch*/ None,
                     /*now*/ 3,
                 )
                 .unwrap(),
@@ -229,6 +230,7 @@ fn advances_loop_rounds_without_exposing_partial_child_state() {
                 None,
                 None,
                 vec![],
+                /*payload_patch*/ None,
                 /*now*/ 5,
             )
             .unwrap();
@@ -317,6 +319,7 @@ fn advances_loop_rounds_without_exposing_partial_child_state() {
                 None,
                 None,
                 vec![],
+                /*payload_patch*/ None,
                 /*now*/ 7,
             )
             .unwrap();
@@ -409,6 +412,7 @@ fn child_failure_settles_the_loop_scope() {
                 None,
                 None,
                 vec![],
+                /*payload_patch*/ None,
                 /*now*/ 3,
             )
             .unwrap();

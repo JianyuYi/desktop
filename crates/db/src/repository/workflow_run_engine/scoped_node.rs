@@ -7,6 +7,7 @@ use super::retry::{RETRY_ABANDONED, settle_retry_waits};
 use super::*;
 
 /// Completes one node and writes its outputs to the owning execution scope.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn complete(
     repository: &SqliteWorkflowRunEngineRepository,
     node_run_id: &WorkflowNodeRunId,
@@ -14,6 +15,7 @@ pub(super) fn complete(
     structured_output: Option<serde_json::Value>,
     stop_reason: Option<String>,
     file_changes: Vec<FileChange>,
+    payload_patch: Option<&serde_json::Value>,
     now: i64,
 ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
     repository
@@ -57,7 +59,12 @@ pub(super) fn complete(
                 return Ok(AdvanceWorkflowRunResult::NotRunning);
             }
             // Merge onto the existing payload so a success never drops the checkpoint keys.
-            let payload = merge_complete_payload(node_payload, stop_reason, file_changes)?;
+            let payload = merge_complete_payload(
+                node_payload,
+                stop_reason,
+                file_changes,
+                payload_patch.cloned(),
+            )?;
             if scope_id == root_scope_id {
                 update_run_execution_state(
                     &transaction,

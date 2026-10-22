@@ -55,27 +55,34 @@ impl SqliteWorkflowRunEngineRepository {
         Self { pool }
     }
 
-    /// Merges a JSON patch into one node-run payload without changing its status.
+    /// Repairs one awaiting node's payload without changing its status.
     ///
-    /// Used for the completion audit after the engine commit and for materializing a snapshot on
-    /// a legacy awaiting node; the single guarded statement keeps existing payload keys intact.
-    pub fn merge_node_payload(
+    /// This is the `prepare`-time repair/materialize write: it only applies while the row is still
+    /// `Pending`, so a completion or cancel that won the race cannot have its terminal payload
+    /// rewritten by a stale snapshot. The single guarded statement keeps existing payload keys
+    /// intact and reports whether it actually wrote anything.
+    pub fn repair_node_payload(
         &self,
         node_run_id: &WorkflowNodeRunId,
         patch: &serde_json::Value,
         now: i64,
-    ) -> Result<(), RepositoryError> {
+    ) -> Result<bool, RepositoryError> {
         let patch = patch.to_string();
         self.pool
             .with_connection(|connection| {
-                connection.execute(
+                let updated = connection.execute(
                     "UPDATE workflow_node_runs
                      SET payload = json_patch(COALESCE(NULLIF(payload, ''), '{}'), ?2),
                          updated_at = ?3
-                     WHERE id = ?1 AND is_deleted = 0",
-                    params![node_run_id.as_ref(), patch, now],
+                     WHERE id = ?1 AND status = ?4 AND is_deleted = 0",
+                    params![
+                        node_run_id.as_ref(),
+                        patch,
+                        now,
+                        WorkflowNodeStatus::Pending.database_value(),
+                    ],
                 )?;
-                Ok(())
+                Ok(updated > 0)
             })
             .map_err(engine_repository_error_from_database)
     }
@@ -424,6 +431,7 @@ impl WorkflowRunEngineRepository for SqliteWorkflowRunEngineRepository {
         structured_output: Option<serde_json::Value>,
         stop_reason: Option<String>,
         file_changes: Vec<FileChange>,
+        payload_patch: Option<&serde_json::Value>,
         now: i64,
     ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
         scoped_node::complete(
@@ -433,6 +441,7 @@ impl WorkflowRunEngineRepository for SqliteWorkflowRunEngineRepository {
             structured_output,
             stop_reason,
             file_changes,
+            payload_patch,
             now,
         )
     }

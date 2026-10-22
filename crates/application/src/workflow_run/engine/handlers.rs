@@ -169,14 +169,42 @@ where
         stop_reason: Option<String>,
         file_changes: Vec<FileChange>,
     ) -> Result<CompleteWorkflowNodeResponse, ApplicationError> {
+        self.complete_node_with_payload_patch(
+            run_id,
+            node_run_id,
+            output,
+            structured_output,
+            stop_reason,
+            file_changes,
+            None,
+        )
+    }
+
+    /// Completes one awaiting interactive node and merges provenance keys in the same transaction.
+    ///
+    /// `payload_patch` carries the forced-completion audit. It is written by the completion
+    /// transaction itself rather than afterwards, so a crash between the two cannot leave a
+    /// completed node with no record of how it was completed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_node_with_payload_patch(
+        &self,
+        run_id: &WorkflowRunId,
+        node_run_id: &WorkflowNodeRunId,
+        output: Option<String>,
+        structured_output: Option<serde_json::Value>,
+        stop_reason: Option<String>,
+        file_changes: Vec<FileChange>,
+        payload_patch: Option<serde_json::Value>,
+    ) -> Result<CompleteWorkflowNodeResponse, ApplicationError> {
         self.engine
-            .complete_node(
+            .complete_node_with_payload_patch(
                 run_id,
                 node_run_id,
                 output,
                 structured_output,
                 stop_reason,
                 file_changes,
+                payload_patch,
             )
             .map_err(ApplicationError::from_workflow_engine_error)?;
         let run = self.find_run(run_id)?;

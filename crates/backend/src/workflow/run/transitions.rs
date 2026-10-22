@@ -1,7 +1,7 @@
 //! Node-run status transitions committed outside the scheduling engine.
 //!
-//! The interactive chain — an agent node parking at awaiting input after its first turn, a
-//! human follow-up turn beginning, and that turn ending — commits guarded node-run transitions
+//! The interactive chain 鈥?an agent node parking at awaiting input after its first turn, a
+//! human follow-up turn beginning, and that turn ending 鈥?commits guarded node-run transitions
 //! directly instead of entering `WorkflowRunEngine`. This sink keeps those commits on the same
 //! discipline as the engine's own transitions (ADR "node runtime orchestration" D7): the
 //! guarded transition commits first, and exactly one run invalidation is published when it
@@ -9,23 +9,26 @@
 //! nothing.
 
 use crate::clock::SystemClock;
+use crate::git_cleanup::KeyedResourceLocks;
 use ora_application::{
     AdvanceWorkflowRunResult, Clock, RepositoryError, WorkflowRunEngineRepository,
     WorkflowRunInvalidationPublisher,
 };
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
-use ora_domain::{WorkflowNodeRunId, WorkflowNodeStatus};
+use ora_domain::{WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunId};
 use std::sync::Arc;
 
 /// Commits the engine-external node-run transitions and publishes their run invalidations.
 ///
 /// The sink shares the engine's invalidation mechanism (the same
 /// [`WorkflowRunInvalidationPublisher`] bridge onto the application event hub), so observers
-/// cannot tell an engine-committed transition from an interactive one — both re-query the same
+/// cannot tell an engine-committed transition from an interactive one 鈥?both re-query the same
 /// persisted state.
 pub(crate) struct WorkflowRunTransitions {
     pool: RepositoryPool,
     events: Arc<dyn WorkflowRunInvalidationPublisher>,
+    /// The same per-run gate the engine and the completion path take (ADR root D2).
+    run_locks: Arc<KeyedResourceLocks>,
 }
 
 impl WorkflowRunTransitions {
@@ -33,8 +36,13 @@ impl WorkflowRunTransitions {
     pub(crate) fn new(
         pool: RepositoryPool,
         events: Arc<dyn WorkflowRunInvalidationPublisher>,
+        run_locks: Arc<KeyedResourceLocks>,
     ) -> Self {
-        Self { pool, events }
+        Self {
+            pool,
+            events,
+            run_locks,
+        }
     }
 
     /// Commits one guarded node-run status transition, publishing the owning run's
@@ -42,7 +50,7 @@ impl WorkflowRunTransitions {
     ///
     /// The run id is resolved from the committed row: callers such as the turn-cleanup path
     /// hold only the node-run id. A row that vanishes between the commit and the read (a
-    /// concurrent restart) publishes nothing — a lost event only leaves a stale view that the
+    /// concurrent restart) publishes nothing 鈥?a lost event only leaves a stale view that the
     /// next transition or refresh clears.
     pub(crate) fn transition_node_run_status(
         &self,
@@ -69,13 +77,19 @@ impl WorkflowRunTransitions {
     /// Parks one running interactive node with its completion snapshot in the same guarded
     /// transaction, then publishes the run invalidation once the commit succeeds.
     ///
+    /// The sink takes the per-run gate itself (ADR D3 step 4): callers must not already hold it 鈥?    /// the gate is not reentrant 鈥?and must therefore call this from a blocking context. Holding
+    /// the gate across the commit is what makes a park serialize against a completion, a cancel,
+    /// and the next scheduling wave instead of relying on the guard alone.
+    ///
     /// A rejected guard (a cancel or completion won the race) is an idempotent no-op: no payload
     /// is written and no invalidation is published.
     pub(crate) fn park_node_run(
         &self,
+        run_id: &WorkflowRunId,
         node_run_id: &WorkflowNodeRunId,
         completion: &serde_json::Value,
     ) -> Result<AdvanceWorkflowRunResult, RepositoryError> {
+        let _gate = self.run_locks.acquire_exclusive(run_id.as_ref());
         let repository = SqliteWorkflowRunEngineRepository::new(self.pool.clone());
         let result = repository.park_node_run(
             node_run_id,
@@ -102,6 +116,7 @@ impl WorkflowRunTransitions {
 #[cfg(test)]
 mod tests {
     use super::WorkflowRunTransitions;
+    use crate::git_cleanup::KeyedResourceLocks;
     use crate::workflow::run::test_fixture::{
         AGENT_GRAPH, RecordingInvalidations, bootstrap, run_test, started_run,
     };
@@ -120,7 +135,11 @@ mod tests {
             let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
             let recording = Arc::new(RecordingInvalidations::default());
-            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+            let transitions = WorkflowRunTransitions::new(
+                pool.clone(),
+                recording.clone(),
+                KeyedResourceLocks::new(),
+            );
 
             let result = transitions.transition_node_run_status(
                 &agent.id,
@@ -156,7 +175,11 @@ mod tests {
             let (_run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
             let recording = Arc::new(RecordingInvalidations::default());
-            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+            let transitions = WorkflowRunTransitions::new(
+                pool.clone(),
+                recording.clone(),
+                KeyedResourceLocks::new(),
+            );
 
             // The node is Running, so a Pending -> Running guard must reject.
             let result = transitions.transition_node_run_status(
@@ -185,7 +208,11 @@ mod tests {
             let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
             let recording = Arc::new(RecordingInvalidations::default());
-            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+            let transitions = WorkflowRunTransitions::new(
+                pool.clone(),
+                recording.clone(),
+                KeyedResourceLocks::new(),
+            );
             let snapshot = serde_json::json!({
                 "completion": {
                     "turnKey": { "userSeq": 1, "endedSeq": 2 },
@@ -193,7 +220,9 @@ mod tests {
                 }
             });
 
-            let result = transitions.park_node_run(&agent.id, &snapshot).unwrap();
+            let result = transitions
+                .park_node_run(&run_id, &agent.id, &snapshot)
+                .unwrap();
 
             assert_eq!(result, ora_application::AdvanceWorkflowRunResult::Advanced);
             assert_eq!(
@@ -222,7 +251,11 @@ mod tests {
             let (run_id, node_runs) = started_run(&temp, &pool, AGENT_GRAPH);
             let agent = node_runs.iter().find(|n| n.node_id == "agent").unwrap();
             let recording = Arc::new(RecordingInvalidations::default());
-            let transitions = WorkflowRunTransitions::new(pool.clone(), recording.clone());
+            let transitions = WorkflowRunTransitions::new(
+                pool.clone(),
+                recording.clone(),
+                KeyedResourceLocks::new(),
+            );
 
             transitions
                 .transition_node_run_status(
@@ -242,6 +275,7 @@ mod tests {
 
             let result = transitions
                 .park_node_run(
+                    &run_id,
                     &agent.id,
                     &serde_json::json!({ "completion": { "blockers": [] } }),
                 )

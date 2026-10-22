@@ -39,25 +39,42 @@ pub(super) fn merge_payload_keys(
 
 /// Merges completion keys into an existing node-run payload without dropping checkpoint keys.
 ///
-/// `stop_reason` is inserted only when `Some`; `file_changes` only when non-empty. When there is
-/// nothing to insert, the existing payload is returned unchanged so a success cannot turn a
-/// checkpoint blob into `NULL`.
+/// `stop_reason` is inserted only when `Some`; `file_changes` only when non-empty. `patch` carries
+/// caller-supplied keys — the forced-completion audit — merged in the same transaction so a
+/// committed node can never be missing its audit. When there is nothing to insert, the existing
+/// payload is returned unchanged so a success cannot turn a checkpoint blob into `NULL`.
 pub(super) fn merge_complete_payload(
     existing: Option<String>,
     stop_reason: Option<String>,
     file_changes: Vec<FileChange>,
+    patch: Option<serde_json::Value>,
 ) -> Result<Option<String>, crate::DatabaseError> {
-    let mut keys = Vec::new();
-    if let Some(reason) = stop_reason {
-        keys.push(("stop_reason", serde_json::json!(reason)));
-    }
-    if !file_changes.is_empty() {
-        keys.push(("file_changes", file_changes_json(&file_changes)));
-    }
-    if keys.is_empty() {
+    let patch = match patch {
+        Some(serde_json::Value::Object(map)) => map,
+        // A scalar or array patch cannot describe payload keys; ignoring it leaves the row's
+        // provenance intact instead of replacing the whole object.
+        _ => serde_json::Map::new(),
+    };
+    if stop_reason.is_none() && file_changes.is_empty() && patch.is_empty() {
         return Ok(existing);
     }
-    Ok(Some(merge_payload_keys(existing.as_deref(), keys)?))
+    let mut map = payload_object(existing.as_deref());
+    if let Some(reason) = stop_reason {
+        map.insert("stop_reason".to_string(), serde_json::json!(reason));
+    }
+    if !file_changes.is_empty() {
+        map.insert("file_changes".to_string(), file_changes_json(&file_changes));
+    }
+    map.extend(patch);
+    Ok(Some(serde_json::Value::Object(map).to_string()))
+}
+
+/// Decodes a node-run payload into its object form, treating NULL or invalid JSON as empty.
+pub(super) fn payload_object(existing: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+    match existing.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok()) {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
 }
 
 /// Merges `payload.checkpoint` (and optional `checkpoint_error`) onto one node-run row.

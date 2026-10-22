@@ -61,6 +61,7 @@ fn loop_limit_success_recovers_and_ignores_duplicate_callbacks() {
                 /*structured_output*/ None,
                 /*stop_reason*/ None,
                 vec![],
+                /*payload_patch*/ None,
                 /*now*/ 50,
             )
             .unwrap();

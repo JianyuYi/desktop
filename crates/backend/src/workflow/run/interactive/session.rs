@@ -12,11 +12,13 @@ use crate::error::BackendError;
 use crate::git_cleanup::KeyedResourceLocks;
 use ora_application::{
     AdvanceWorkflowRunResult, AgentOutputContract, ApplicationError, RepositoryError,
-    WorkflowGraph, WorkflowRunEngineRepository,
+    WorkflowGraph, WorkflowRunEngineRepository, WorkflowRunPayload,
 };
+use ora_contracts::WorkflowRunLocale;
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
 use ora_domain::{
-    PromptInactivityPolicy, SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunStatus,
+    PromptInactivityPolicy, SessionId, WorkflowNodeRunId, WorkflowNodeStatus, WorkflowRunId,
+    WorkflowRunStatus,
 };
 use ora_history::{SessionHistory, read_session_history};
 use ora_logging::ora_warn;
@@ -36,8 +38,16 @@ use crate::workflow::run::transitions::WorkflowRunTransitions;
 /// only covers the hand-off between the actor's confirmation and the history file.
 const TURN_END_WAIT: Duration = Duration::from_secs(2);
 
-/// How often cleanup re-reads the persisted history while waiting for `TurnEnded`.
+/// First interval between persisted-history reads while waiting for `TurnEnded`.
+///
+/// The wait doubles this up to [`TURN_END_POLL_MAX_INTERVAL`]: an interactive turn already costs
+/// one whole-history read per park (ADR invariant 7), and a fixed 50ms poll spent forty of them on
+/// a slow flush for one boundary. Backing off keeps the early reads that usually succeed and cuts
+/// the tail to a handful.
 const TURN_END_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Ceiling for the cleanup poll interval, so a slow flush is still noticed well inside the window.
+const TURN_END_POLL_MAX_INTERVAL: Duration = Duration::from_millis(400);
 
 /// A granted turn carries workflow policy only when it has a workflow owner.
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +56,9 @@ pub(crate) enum HumanTurnAdmission {
     Workflow {
         node_run_id: WorkflowNodeRunId,
         prompt_inactivity: PromptInactivityPolicy,
+        /// The localized step boundary this turn's prompt must carry, rendered from the frozen
+        /// graph so the recorded user message stays the user's own text.
+        step_boundary: String,
     },
 }
 
@@ -111,11 +124,21 @@ pub(crate) async fn begin_human_turn(
         // an awaiting node at Running or let a newer draft change an admitted turn's behavior.
         let graph = WorkflowGraph::parse(&context.graph_json)
             .map_err(ApplicationError::WorkflowRunGraphParse)?;
-        let config = graph
+        let node = graph
             .execution_node(&node_run.node_id)
-            .and_then(|node| node.agent_config.as_ref())
+            .ok_or_else(|| node_not_awaiting(&node_run.node_id))?;
+        let config = node
+            .agent_config
+            .as_ref()
             .ok_or_else(|| node_not_awaiting(&node_run.node_id))?;
         let prompt_inactivity = config.prompt_inactivity;
+        // Render the boundary while the frozen graph is at hand: the prompt path must not re-read
+        // scheduling state, and the turn must always carry the step it was admitted for.
+        let step_boundary = super::super::prompt::render_step_boundary(
+            &graph,
+            node,
+            run_locale(context.run.payload.as_deref()),
+        );
         // The guarded transition both grants the turn and races against any concurrent mutation;
         // a rejected transition means the node is no longer awaiting and the prompt must not
         // start. It commits through the shared transition sink, so a granted turn publishes the
@@ -131,6 +154,7 @@ pub(crate) async fn begin_human_turn(
             AdvanceWorkflowRunResult::Advanced => Ok(HumanTurnAdmission::Workflow {
                 node_run_id: node_run.id,
                 prompt_inactivity,
+                step_boundary,
             }),
             AdvanceWorkflowRunResult::NotRunning | AdvanceWorkflowRunResult::NotFound => {
                 Err(node_not_awaiting(&node_run.node_id))
@@ -145,15 +169,12 @@ pub(crate) async fn begin_human_turn(
 ///
 /// Cleanup may run before the runtime has durably written this turn's `TurnEnded`, so it polls the
 /// persisted history for a bounded time before deriving the snapshot the read projection and a
-/// later completion both use. A turn that never settles parks with the provisional unknown
-/// snapshot, which a later `prepare` repairs once history catches up.
+/// later completion both use. A turn that never settles parks with the provisional snapshot of the
+/// last readable history, which a later `prepare` repairs once the turn boundary appears.
 ///
-/// This is deliberately exempt from the per-run gate: it is a guarded `Running → Pending` cleanup
-/// transition that computes no ready set, dispatches nothing, and becomes a no-op when the node has
-/// already reached a terminal state. Routing the fire-and-forget drop hook through the gate would
-/// add a run-id lookup and a blocking lock for no scheduling benefit. The commit still goes
-/// through the shared transition sink, so a completed park publishes the run invalidation while
-/// a no-op park publishes nothing.
+/// The park itself takes the per-run gate (ADR D3 step 4) and both the history read and that lock
+/// are blocking work, so it runs on the blocking pool. Everything before it — resolving the node's
+/// session and output contract — is one short read that holds no lock.
 pub(crate) async fn end_human_turn(
     pool: &RepositoryPool,
     sessions_root: &Path,
@@ -183,9 +204,10 @@ pub(crate) async fn end_human_turn(
     let completion = completion_payload(&snapshot);
     let transitions = transitions.clone();
     let node_run_id = node_run_id.clone();
+    let run_id = context.run_id.clone();
     tokio::task::spawn_blocking(move || {
         transitions
-            .park_node_run(&node_run_id, &completion)
+            .park_node_run(&run_id, &node_run_id, &completion)
             .map_err(repository_error)?;
         Ok(())
     })
@@ -220,6 +242,8 @@ pub(crate) async fn restore_human_turn(
 
 /// The persisted inputs cleanup needs before it can snapshot a dropped turn.
 struct TurnEndContext {
+    /// The run that owns the node, which is the key its park must serialize on.
+    run_id: WorkflowRunId,
     /// The session bound to the node; absent when the node row no longer exists.
     session_id: Option<SessionId>,
     /// The frozen node's output contract, which decides whether the reply satisfies the node.
@@ -253,6 +277,7 @@ impl TurnEndContext {
             None => None,
         };
         Ok(Some(Self {
+            run_id: node_run.run_id,
             session_id: node_run.session_id,
             output_contract,
         }))
@@ -289,18 +314,32 @@ fn frozen_output_contract(graph_json: &str, node_id: &str) -> Option<AgentOutput
 /// Polling persisted history keeps cleanup independent of the runtime actor: the actor already
 /// wrote the boundary by the time the stream cleanup runs, but a slow filesystem flush must not
 /// park a node whose response the snapshot could still capture.
+///
+/// A turn that never settles still parks from the last readable history, so the provisional
+/// snapshot keeps the `userSeq` the later repair matches on (ADR invariant 19); only a history
+/// that cannot be read at all falls back to the identity-free unknown snapshot.
 async fn settled_snapshot(
     sessions_root: &Path,
     session_id: &SessionId,
     output_contract: Option<&AgentOutputContract>,
 ) -> CompletionSnapshot {
     let deadline = tokio::time::Instant::now() + TURN_END_WAIT;
+    let mut interval = TURN_END_POLL_INTERVAL;
     loop {
         match read_history_blocking(sessions_root, session_id).await {
             Ok(history) => {
                 let snapshot = derive_completion_snapshot(&history, output_contract, false);
                 if snapshot.turn_key.is_some() {
                     return snapshot;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    // The history was readable; what is missing is the turn boundary, so the
+                    // reason names the unsettled turn rather than claiming the history is
+                    // unavailable, and the provisional snapshot keeps the `userSeq` the later
+                    // repair matches on (ADR invariant 19).
+                    let mut unsettled = derive_completion_snapshot(&history, output_contract, true);
+                    unsettled.warnings.push("turn_not_settled".to_string());
+                    return unsettled;
                 }
             }
             Err(error) => {
@@ -314,10 +353,8 @@ async fn settled_snapshot(
                 return unknown_completion_snapshot(true);
             }
         }
-        if tokio::time::Instant::now() >= deadline {
-            return unknown_completion_snapshot(true);
-        }
-        tokio::time::sleep(TURN_END_POLL_INTERVAL).await;
+        tokio::time::sleep(interval).await;
+        interval = (interval * 2).min(TURN_END_POLL_MAX_INTERVAL);
     }
 }
 
@@ -332,6 +369,14 @@ async fn read_history_blocking(
         .await
         .map_err(|source| BackendError::internal("history read did not complete", source))?
         .map_err(|error| BackendError::internal("failed to read session history", error))
+}
+
+/// Reads the display language frozen on the run, defaulting to Chinese like the rest of the backend.
+fn run_locale(payload: Option<&str>) -> WorkflowRunLocale {
+    payload
+        .and_then(|payload| serde_json::from_str::<WorkflowRunPayload>(payload).ok())
+        .map(|payload| payload.locale)
+        .unwrap_or(WorkflowRunLocale::ZhCn)
 }
 
 /// Renders the public rejection for a workflow node that cannot accept a prompt turn.
@@ -458,13 +503,17 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(
-                result,
-                HumanTurnAdmission::Workflow {
-                    node_run_id: _node_run_id,
-                    prompt_inactivity: PromptInactivityPolicy::Timeout,
-                }
-            );
+            let HumanTurnAdmission::Workflow {
+                node_run_id,
+                prompt_inactivity,
+                step_boundary,
+            } = result
+            else {
+                panic!("a bound interactive session must be admitted as a workflow turn");
+            };
+            assert_eq!(node_run_id, _node_run_id);
+            assert_eq!(prompt_inactivity, PromptInactivityPolicy::Timeout);
+            assert!(step_boundary.starts_with("<workflow_step_boundary>"));
 
             let node_runs = SqliteWorkflowRunRepository::new(pool)
                 .list_node_runs(&_run_id)
@@ -539,13 +588,17 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(
-                result,
-                HumanTurnAdmission::Workflow {
-                    node_run_id: _node_run_id,
-                    prompt_inactivity: PromptInactivityPolicy::Timeout,
-                }
-            );
+            let HumanTurnAdmission::Workflow {
+                node_run_id,
+                prompt_inactivity,
+                step_boundary,
+            } = result
+            else {
+                panic!("a bound interactive session must be admitted as a workflow turn");
+            };
+            assert_eq!(node_run_id, _node_run_id);
+            assert_eq!(prompt_inactivity, PromptInactivityPolicy::Timeout);
+            assert!(step_boundary.starts_with("<workflow_step_boundary>"));
             assert_eq!(
                 *recording.published.lock().unwrap(),
                 vec![run_id.to_string()],

@@ -95,6 +95,49 @@ pub(crate) fn unknown_completion_snapshot(provisional: bool) -> CompletionSnapsh
     }
 }
 
+/// Builds the payload patch that records why a human forced an incomplete completion.
+///
+/// The audit is a payload key of its own (`completion_forced`), never mixed into the live
+/// `completion` snapshot, so the projection keeps rejecting a forced node's blockers on the next
+/// read while the record of the decision survives the completion. `reason` is the blockers
+/// snapshot only: no user-authored text is copied into it.
+pub(crate) fn forced_completion_audit(snapshot: &CompletionSnapshot) -> Value {
+    let without_turn = snapshot.turn_key.is_none();
+    json!({
+        "completion_forced": {
+            "blockers": snapshot.blockers,
+            "without_turn": without_turn,
+            "output_source": if without_turn {
+                "last_assistant_message"
+            } else {
+                "turn_window"
+            },
+        }
+    })
+}
+
+/// Returns the last assistant text after the last user message, whether or not a turn settled.
+///
+/// This is the forced-completion text for a snapshot with no turn key: the contract forbids
+/// borrowing a previous turn's `EndTurn`, but the user still asked for the current draft to be
+/// taken as the output.
+pub(crate) fn trailing_assistant_text(history: &SessionHistory) -> Option<String> {
+    let user_seq = last_user_message_seq(history)?;
+    history
+        .lines
+        .iter()
+        .filter_map(|line| {
+            if line.seq <= user_seq {
+                return None;
+            }
+            let HistoryRecord::Update { update, .. } = &line.record else {
+                return None;
+            };
+            assistant_text(update.as_ref()).map(str::to_string)
+        })
+        .next_back()
+}
+
 /// Parses the completion snapshot stored on a node-run payload, if it is present and valid.
 pub(crate) fn parse_completion_snapshot(payload: Option<&str>) -> Option<CompletionSnapshot> {
     let payload: Value = serde_json::from_str(payload?).ok()?;
@@ -176,28 +219,32 @@ pub(crate) fn derive_completion_snapshot(
     }
 
     // A missing final message is an empty final text; the contract decides whether that blocks.
+    // Without a settled turn there is no output to judge at all: `turn_unknown` already blocks,
+    // and an `empty_output` warning would describe a turn the history never closed.
     let final_text = final_text.unwrap_or_default();
-    match output_contract {
-        None | Some(AgentOutputContract::None) => {
-            if final_text.is_empty() {
-                warnings.push("empty_output".to_string());
+    if turn.is_some() {
+        match output_contract {
+            None | Some(AgentOutputContract::None) => {
+                if final_text.is_empty() {
+                    warnings.push("empty_output".to_string());
+                }
             }
-        }
-        Some(AgentOutputContract::Text) => {
-            if final_text.trim().is_empty() {
-                blockers.push(CompletionBlocker::new(CompletionBlockerKind::OutputMissing));
+            Some(AgentOutputContract::Text) => {
+                if final_text.trim().is_empty() {
+                    blockers.push(CompletionBlocker::new(CompletionBlockerKind::OutputMissing));
+                }
             }
-        }
-        Some(AgentOutputContract::Structured { .. }) => {
-            if let Err(error) = super::executor::apply_output_contract(
-                output_contract,
-                Some(final_text),
-                "interactive-node",
-            ) {
-                blockers.push(CompletionBlocker::with_message(
-                    CompletionBlockerKind::StructuredInvalid,
-                    error.to_string(),
-                ));
+            Some(AgentOutputContract::Structured { .. }) => {
+                if let Err(error) = super::executor::apply_output_contract(
+                    output_contract,
+                    Some(final_text),
+                    "interactive-node",
+                ) {
+                    blockers.push(CompletionBlocker::with_message(
+                        CompletionBlockerKind::StructuredInvalid,
+                        error.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -273,7 +320,10 @@ fn assistant_text(update: &SessionUpdate) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionBlockerKind, TurnKey, completion_payload, derive_completion_snapshot};
+    use super::{
+        CompletionBlockerKind, TurnKey, completion_payload, derive_completion_snapshot,
+        forced_completion_audit, trailing_assistant_text, unknown_completion_snapshot,
+    };
     use agent_client_protocol_schema::v1::{
         ContentBlock, ContentChunk, SessionUpdate, StopReason, TextContent,
     };
@@ -552,5 +602,87 @@ mod tests {
         let payload = completion_payload(&snapshot);
         assert_eq!(payload["completion"]["userSeq"], 1);
         assert_eq!(payload["completion"]["provisional"], true);
+    }
+
+    /// A stray assistant message before the last user message is not the forced output.
+    #[test]
+    fn trailing_assistant_text_stays_inside_the_last_turn() {
+        assert_eq!(
+            trailing_assistant_text(&history(
+                vec![
+                    user(1, "first"),
+                    assistant(2, "first answer"),
+                    user(3, "second"),
+                    assistant(4, "second answer"),
+                ],
+                HistoryIntegrity::Complete,
+            )),
+            Some("second answer".to_string())
+        );
+        // A user message with no reply yet is still the current turn, so nothing is borrowed.
+        assert_eq!(
+            trailing_assistant_text(&history(
+                vec![
+                    user(1, "first"),
+                    assistant(2, "first answer"),
+                    user(3, "second")
+                ],
+                HistoryIntegrity::Complete,
+            )),
+            None
+        );
+    }
+
+    /// The audit records the blockers and names where a forced output came from.
+    #[test]
+    fn forced_audit_names_the_output_source() {
+        let settled = derive_completion_snapshot(
+            &history(
+                vec![
+                    user(1, "go"),
+                    assistant(2, "done"),
+                    ended(3, StopReason::Cancelled),
+                ],
+                HistoryIntegrity::Complete,
+            ),
+            None,
+            false,
+        );
+        assert_eq!(
+            forced_completion_audit(&settled)["completion_forced"],
+            json!({
+                "blockers": [{ "kind": "turn_stopped" }],
+                "without_turn": false,
+                "output_source": "turn_window",
+            })
+        );
+
+        let unsettled = unknown_completion_snapshot(true);
+        assert_eq!(
+            forced_completion_audit(&unsettled)["completion_forced"],
+            json!({
+                "blockers": [{ "kind": "turn_unknown" }],
+                "without_turn": true,
+                "output_source": "last_assistant_message",
+            })
+        );
+    }
+
+    /// A turn with no settled boundary reports no output-contract warning or blocker of its own.
+    #[test]
+    fn an_unsettled_turn_does_not_report_output_contract_problems() {
+        let snapshot = derive_completion_snapshot(
+            &history(
+                vec![user(1, "go"), assistant(2, "still working")],
+                HistoryIntegrity::Complete,
+            ),
+            Some(&AgentOutputContract::Text),
+            false,
+        );
+        assert!(snapshot.warnings.is_empty());
+        assert_eq!(
+            snapshot.blockers.first().map(|blocker| blocker.kind),
+            Some(CompletionBlockerKind::TurnUnknown)
+        );
     }
 }

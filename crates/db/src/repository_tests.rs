@@ -384,6 +384,7 @@ fn standalone_session_list_excludes_workflow_node_sessions() {
                 /*structured_output*/ None,
                 /*stop_reason*/ None,
                 Vec::new(),
+                /*payload_patch*/ None,
                 /*now*/ 60,
             )
             .unwrap(),
@@ -1354,6 +1355,7 @@ fn find_last_failed_attempt_returns_the_latest_soft_deleted_failure() {
             None,
             Some("end_turn".to_string()),
             Vec::new(),
+            /*payload_patch*/ None,
             110,
         )
         .unwrap();
@@ -1802,6 +1804,7 @@ fn fail_node_writes_file_changes_in_the_same_shape_as_complete_node() {
             None,
             Some("end_turn".to_string()),
             file_changes.clone(),
+            /*payload_patch*/ None,
             50,
         )
         .unwrap();
@@ -1877,6 +1880,7 @@ fn complete_node_merges_stop_reason_into_existing_checkpoint_payload() {
                 additions: 1,
                 deletions: 0,
             }],
+            /*payload_patch*/ None,
             60,
         )
         .unwrap();

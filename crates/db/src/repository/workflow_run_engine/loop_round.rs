@@ -203,6 +203,7 @@ pub(super) fn advance(
                                 parent_payload,
                                 Some(stop_reason.into()),
                                 vec![],
+                                None,
                             )?,
                             now,
                         ],

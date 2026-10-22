@@ -1,0 +1,428 @@
+//! Completion gate coverage: error precedence, the legacy materialize path and provisional repair.
+//!
+//! Every case drives `prepare_completion` against real SQLite rows and a real history file, so the
+//! assertions describe the contract a client observes rather than a helper's return value.
+
+use super::super::completion_snapshot::{
+    CompletionBlocker, CompletionBlockerKind, CompletionSnapshot, TurnKey, completion_payload,
+    parse_completion_snapshot,
+};
+use super::completion::prepare_completion;
+use crate::workflow::run::test_fixture::{
+    INTERACTIVE_AGENT_GRAPH, bind_and_park, bootstrap, end_fixture_turn, run_test, started_run,
+    write_open_turn, write_settled_turn,
+};
+use ora_application::WorkflowRunRepository;
+use ora_contracts::{
+    PublicError, WorkflowNodeCompletionBlocker, WorkflowNodeCompletionBlockerKind,
+    WorkflowNodeTurnKey,
+};
+use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository, SqliteWorkflowRunRepository};
+use ora_domain::{WorkflowNodeRunId, WorkflowRunId};
+use ora_utils::hash::sha256_hex;
+use pretty_assertions::assert_eq;
+use std::path::Path;
+
+/// A stopped turn that has already parked reports the blocker the user must resolve.
+fn stopped_snapshot() -> CompletionSnapshot {
+    CompletionSnapshot {
+        user_seq: Some(0),
+        turn_key: Some(TurnKey {
+            user_seq: 0,
+            ended_seq: 2,
+        }),
+        stop_reason: Some("cancelled".to_string()),
+        blockers: vec![CompletionBlocker {
+            kind: CompletionBlockerKind::TurnStopped,
+            params: serde_json::Value::Null,
+        }],
+        warnings: Vec::new(),
+        output_digest: Some(format!("sha256:{}", sha256_hex(b"partial"))),
+        provisional: false,
+    }
+}
+
+/// Seeds one node's completion snapshot exactly as a park would have written it.
+fn store_snapshot(
+    pool: &RepositoryPool,
+    node_run_id: &WorkflowNodeRunId,
+    snapshot: &CompletionSnapshot,
+) {
+    let repository = SqliteWorkflowRunEngineRepository::new(pool.clone());
+    assert!(
+        repository
+            .repair_node_payload(node_run_id, &completion_payload(snapshot), 60)
+            .expect("seed completion snapshot"),
+        "the node must still be awaiting input when the snapshot is seeded"
+    );
+}
+
+/// Reads the persisted completion snapshot of the named node.
+fn stored_snapshot(pool: &RepositoryPool, run_id: &WorkflowRunId) -> Option<CompletionSnapshot> {
+    SqliteWorkflowRunRepository::new(pool.clone())
+        .list_node_runs(run_id)
+        .expect("node runs")
+        .into_iter()
+        .find(|node| node.node_id == "agent")
+        .and_then(|node| parse_completion_snapshot(node.payload.as_deref()))
+}
+
+/// Builds one parked interactive run whose session history root is the caller's directory.
+fn parked_run(
+    temp: &tempfile::TempDir,
+    pool: &RepositoryPool,
+) -> (WorkflowRunId, WorkflowNodeRunId, std::path::PathBuf) {
+    let (run_id, node_runs) = started_run(temp, pool, INTERACTIVE_AGENT_GRAPH);
+    let agent = node_runs
+        .iter()
+        .find(|node| node.node_id == "agent")
+        .expect("agent node");
+    let (_session_id, node_run_id) = bind_and_park(pool, agent);
+    (run_id, node_run_id, temp.path().join("sessions"))
+}
+
+/// The turn identity is validated before blockers, so a stale completion names its conflict.
+#[test]
+fn a_changed_turn_wins_over_the_blockers_gate() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "partial");
+        write_settled_turn(&sessions_root, "session-1", "carry on", "final");
+        store_snapshot(&pool, &node_run_id, &stopped_snapshot());
+
+        let error = prepare_completion(
+            &pool,
+            &sessions_root,
+            &run_id,
+            "agent",
+            /*force*/ false,
+        )
+        .expect_err("a completion against a superseded turn is rejected");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeTurnChanged(ora_contracts::WorkflowNodeTurnChangedParams {
+                node_id: "agent".to_string(),
+                expected: Some(WorkflowNodeTurnKey {
+                    user_seq: 0,
+                    ended_seq: 2,
+                }),
+                actual: Some(WorkflowNodeTurnKey {
+                    user_seq: 3,
+                    ended_seq: 5,
+                }),
+            })
+        );
+    });
+}
+
+/// A rewritten final message under the same turn is reported as an output conflict.
+#[test]
+fn changed_output_text_reports_the_two_digests() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "rewritten");
+        let mut stored = stopped_snapshot();
+        stored.blockers = Vec::new();
+        store_snapshot(&pool, &node_run_id, &stored);
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect_err("a completion against rewritten output is rejected");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeOutputChanged(
+                ora_contracts::WorkflowNodeOutputChangedParams {
+                    node_id: "agent".to_string(),
+                    expected: stored.output_digest.clone(),
+                    actual: Some(format!("sha256:{}", sha256_hex(b"rewritten"))),
+                }
+            )
+        );
+    });
+}
+
+/// A parked stopped turn returns its blockers so the client can explain why it cannot advance.
+#[test]
+fn blocked_turn_returns_every_blocker_with_its_detail() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "partial");
+        let mut stored = stopped_snapshot();
+        stored.blockers.push(CompletionBlocker {
+            kind: CompletionBlockerKind::StructuredInvalid,
+            params: serde_json::json!({ "message": "invalid response" }),
+        });
+        store_snapshot(&pool, &node_run_id, &stored);
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect_err("a blocked turn cannot be completed without force");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeIncomplete(ora_contracts::WorkflowNodeIncompleteParams {
+                node_id: "agent".to_string(),
+                blockers: vec![
+                    WorkflowNodeCompletionBlocker {
+                        kind: WorkflowNodeCompletionBlockerKind::TurnStopped,
+                        message: None,
+                    },
+                    WorkflowNodeCompletionBlocker {
+                        kind: WorkflowNodeCompletionBlockerKind::StructuredInvalid,
+                        message: Some("invalid response".to_string()),
+                    },
+                ],
+            })
+        );
+    });
+}
+
+/// A node parked before snapshots existed is materialized and then gated like any other node.
+#[test]
+fn a_legacy_node_is_materialized_and_blocked_by_an_unsettled_turn() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, _node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_open_turn(&sessions_root, "session-1", "go", "still going");
+        assert_eq!(stored_snapshot(&pool, &run_id), None, "no snapshot yet");
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect_err("an unsettled turn cannot be completed");
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeIncomplete(ora_contracts::WorkflowNodeIncompleteParams {
+                node_id: "agent".to_string(),
+                blockers: vec![WorkflowNodeCompletionBlocker {
+                    kind: WorkflowNodeCompletionBlockerKind::TurnUnknown,
+                    message: None,
+                }],
+            })
+        );
+        // The materialized snapshot keeps the identity a later provisional repair needs.
+        assert_eq!(
+            stored_snapshot(&pool, &run_id),
+            Some(CompletionSnapshot {
+                user_seq: Some(0),
+                turn_key: None,
+                stop_reason: None,
+                blockers: vec![CompletionBlocker {
+                    kind: CompletionBlockerKind::TurnUnknown,
+                    params: serde_json::Value::Null,
+                }],
+                warnings: Vec::new(),
+                output_digest: None,
+                provisional: false,
+            })
+        );
+    });
+}
+
+/// A settled legacy node completes with its own turn window instead of the pre-snapshot fallback.
+#[test]
+fn a_legacy_node_with_a_settled_turn_completes_on_its_turn_window() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, _node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(
+            &sessions_root,
+            "session-1",
+            "draft the plan",
+            "here is the plan",
+        );
+
+        let prepared =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", false).expect("ready");
+
+        assert_eq!(prepared.output, Some("here is the plan".to_string()));
+        assert_eq!(prepared.audit, None);
+        assert_eq!(
+            stored_snapshot(&pool, &run_id).and_then(|snapshot| snapshot.turn_key),
+            Some(TurnKey {
+                user_seq: 0,
+                ended_seq: 2,
+            })
+        );
+    });
+}
+
+/// A provisional snapshot is repaired once the turn settles for the same user message.
+#[test]
+fn a_provisional_snapshot_is_repaired_for_the_same_user_message() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_open_turn(&sessions_root, "session-1", "go", "done");
+        store_snapshot(
+            &pool,
+            &node_run_id,
+            &CompletionSnapshot {
+                user_seq: Some(0),
+                turn_key: None,
+                stop_reason: None,
+                blockers: vec![CompletionBlocker {
+                    kind: CompletionBlockerKind::TurnUnknown,
+                    params: serde_json::Value::Null,
+                }],
+                warnings: vec!["turn_not_settled".to_string()],
+                output_digest: None,
+                provisional: true,
+            },
+        );
+        end_fixture_turn(
+            &sessions_root,
+            "session-1",
+            agent_client_protocol_schema::v1::StopReason::EndTurn,
+        );
+
+        let prepared =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", false).expect("repaired");
+
+        assert_eq!(prepared.output, Some("done".to_string()));
+        let repaired = stored_snapshot(&pool, &run_id).expect("repaired snapshot");
+        assert_eq!(
+            repaired.turn_key,
+            Some(TurnKey {
+                user_seq: 0,
+                ended_seq: 2,
+            })
+        );
+        assert!(!repaired.provisional);
+    });
+}
+
+/// A newer user message never stands in for the turn a provisional snapshot described.
+#[test]
+fn a_provisional_snapshot_of_another_turn_is_left_alone() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "first", "one");
+        write_settled_turn(&sessions_root, "session-1", "second", "two");
+        let provisional = CompletionSnapshot {
+            user_seq: Some(0),
+            turn_key: None,
+            stop_reason: None,
+            blockers: vec![CompletionBlocker {
+                kind: CompletionBlockerKind::TurnUnknown,
+                params: serde_json::Value::Null,
+            }],
+            warnings: vec!["turn_not_settled".to_string()],
+            output_digest: None,
+            provisional: true,
+        };
+        store_snapshot(&pool, &node_run_id, &provisional);
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect_err("another turn cannot complete this one");
+        assert!(matches!(
+            error.public_error(),
+            PublicError::WorkflowNodeIncomplete(_)
+        ));
+        assert_eq!(
+            stored_snapshot(&pool, &run_id),
+            Some(provisional),
+            "a mismatched user message must not be rewritten"
+        );
+    });
+}
+
+/// A forced completion without a settled turn takes the last reply and records why.
+#[test]
+fn forcing_an_unsettled_turn_records_the_last_assistant_message() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, _node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_open_turn(&sessions_root, "session-1", "go", "draft only");
+
+        let prepared =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", true).expect("forced");
+
+        assert_eq!(prepared.output, Some("draft only".to_string()));
+        assert_eq!(
+            prepared.audit,
+            Some(serde_json::json!({
+                "completion_forced": {
+                    "blockers": [{ "kind": "turn_unknown" }],
+                    "without_turn": true,
+                    "output_source": "last_assistant_message",
+                }
+            }))
+        );
+    });
+}
+
+/// A forced completion of a stopped but settled turn records the turn window as its source.
+#[test]
+fn forcing_a_stopped_turn_records_the_turn_window() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "partial");
+        store_snapshot(&pool, &node_run_id, &stopped_snapshot());
+
+        let prepared =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", true).expect("forced");
+
+        assert_eq!(prepared.output, Some("partial".to_string()));
+        assert_eq!(
+            prepared.audit,
+            Some(serde_json::json!({
+                "completion_forced": {
+                    "blockers": [{ "kind": "turn_stopped" }],
+                    "without_turn": false,
+                    "output_source": "turn_window",
+                }
+            }))
+        );
+    });
+}
+
+/// A settled turn with output is ready without materializing a second snapshot.
+#[test]
+fn an_existing_ready_snapshot_is_not_rewritten() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "done");
+        let ready = CompletionSnapshot {
+            user_seq: Some(0),
+            turn_key: Some(TurnKey {
+                user_seq: 0,
+                ended_seq: 2,
+            }),
+            stop_reason: Some("end_turn".to_string()),
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+            output_digest: Some(format!("sha256:{}", sha256_hex(b"done"))),
+            provisional: false,
+        };
+        store_snapshot(&pool, &node_run_id, &ready);
+
+        let prepared = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect("ready without a rewrite");
+
+        assert_eq!(prepared.output, Some("done".to_string()));
+        assert_eq!(stored_snapshot(&pool, &run_id), Some(ready));
+    });
+}
+
+/// The history file is read once per prepare, which is what keeps a long turn affordable.
+#[test]
+fn a_missing_history_file_is_read_as_an_empty_turn() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, _node_run_id, sessions_root) = parked_run(&temp, &pool);
+        assert!(!Path::new(&sessions_root).exists());
+
+        let error = prepare_completion(&pool, &sessions_root, &run_id, "agent", false)
+            .expect_err("an empty session has no turn to complete");
+
+        assert!(matches!(
+            error.public_error(),
+            PublicError::WorkflowNodeIncomplete(_)
+        ));
+    });
+}
