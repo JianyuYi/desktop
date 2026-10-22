@@ -16,6 +16,10 @@ export type CancelWorkflowRunResponse = { run: WorkflowRun };
 export type CompleteWorkflowNodeRequest = {
   runId: string;
   nodeId: string;
+  /**
+   * Explicitly completes despite blockers; the node payload records the forced audit.
+   */
+  force: boolean;
   requester?: NodeCompletionRequester;
 };
 

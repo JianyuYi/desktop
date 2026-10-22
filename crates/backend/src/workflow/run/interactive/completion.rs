@@ -5,8 +5,8 @@
 //! engine commit are done by the caller around [`prepare_completion`].
 
 use super::super::completion_snapshot::{
-    completion_final_text, derive_completion_snapshot, parse_completion_snapshot,
-    unknown_completion_snapshot,
+    completion_final_text, completion_payload, derive_completion_snapshot,
+    parse_completion_snapshot, unknown_completion_snapshot,
 };
 use super::super::executor::apply_output_contract;
 use super::super::worktree::{capture_worktree_snapshot, compute_file_changes};
@@ -17,7 +17,9 @@ use crate::git_cleanup::KeyedResourceLocks;
 #[cfg(test)]
 use agent_client_protocol_schema::v1::StopReason;
 use agent_client_protocol_schema::v1::{ContentBlock, SessionUpdate};
-use ora_application::{ApplicationError, FileChange, WorkflowGraph, WorkflowRunEngineRepository};
+use ora_application::{
+    ApplicationError, Clock, FileChange, WorkflowGraph, WorkflowRunEngineRepository,
+};
 use ora_contracts::{EmptyErrorParams, PublicError};
 use ora_db::{RepositoryPool, SqliteWorkflowRunEngineRepository};
 use ora_domain::{
@@ -37,6 +39,8 @@ pub(crate) struct PreparedCompletion {
     pub stop_reason: Option<String>,
     pub file_changes: Vec<FileChange>,
     pub session_id: Option<SessionId>,
+    /// Whether the human explicitly forced the completion; the caller records the audit.
+    pub forced: bool,
 }
 
 /// Atomically claims an awaiting interactive node for manual completion under the per-run gate.
@@ -241,6 +245,21 @@ pub(crate) fn prepare_completion(
             }
         };
 
+    if !has_stored_snapshot {
+        let patch = completion_payload(&snapshot);
+        if let Err(error) = repository.merge_node_payload(
+            &node_run.id,
+            &patch,
+            crate::clock::SystemClock.now_timestamp_millis(),
+        ) {
+            ora_warn!(
+                node_run_id = %node_run.id,
+                error = %error,
+                "failed to materialize a completion snapshot for a legacy awaiting node"
+            );
+        }
+    }
+
     let file_changes = match load_worktree_baseline(baselines_root, &node_run.id) {
         Some(baseline) => {
             let worktree_root = agent_runtime.workspace_cwd(&context.workspace.id)?;
@@ -267,6 +286,7 @@ pub(crate) fn prepare_completion(
         stop_reason,
         file_changes,
         session_id: node_run.session_id,
+        forced: force,
     })
 }
 

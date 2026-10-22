@@ -234,6 +234,7 @@ impl WorkflowRuns {
         let structured_output = prepared.structured_output.clone();
         let stop_reason = prepared.stop_reason.clone();
         let file_changes = prepared.file_changes.clone();
+        let forced = prepared.forced;
         let response = spawn_repository_work(move || {
             let _gate = run_locks.acquire_exclusive(run_id.as_ref());
             let result = crate::workflow::run::interactive::revalidate_completion(
@@ -242,7 +243,7 @@ impl WorkflowRuns {
                 &node_run_id,
             )
             .and_then(|()| {
-                engine
+                let response = engine
                     .complete_node(
                         &run_id,
                         &node_run_id,
@@ -251,7 +252,22 @@ impl WorkflowRuns {
                         stop_reason,
                         file_changes,
                     )
-                    .map_err(BackendError::from)
+                    .map_err(BackendError::from)?;
+                if forced {
+                    let repository = ora_db::SqliteWorkflowRunEngineRepository::new(pool.clone());
+                    if let Err(error) = repository.merge_node_payload(
+                        &node_run_id,
+                        &serde_json::json!({ "completionForced": { "forced": true } }),
+                        crate::clock::SystemClock.now_timestamp_millis(),
+                    ) {
+                        ora_warn!(
+                            node_run_id = %node_run_id,
+                            error = %error,
+                            "completed a forced node but failed to record its completion audit"
+                        );
+                    }
+                }
+                Ok(response)
             });
             completing
                 .lock()

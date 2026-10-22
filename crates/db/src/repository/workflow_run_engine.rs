@@ -55,6 +55,31 @@ impl SqliteWorkflowRunEngineRepository {
         Self { pool }
     }
 
+    /// Merges a JSON patch into one node-run payload without changing its status.
+    ///
+    /// Used for the completion audit after the engine commit and for materializing a snapshot on
+    /// a legacy awaiting node; the single guarded statement keeps existing payload keys intact.
+    pub fn merge_node_payload(
+        &self,
+        node_run_id: &WorkflowNodeRunId,
+        patch: &serde_json::Value,
+        now: i64,
+    ) -> Result<(), RepositoryError> {
+        let patch = patch.to_string();
+        self.pool
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE workflow_node_runs
+                     SET payload = json_patch(COALESCE(NULLIF(payload, ''), '{}'), ?2),
+                         updated_at = ?3
+                     WHERE id = ?1 AND is_deleted = 0",
+                    params![node_run_id.as_ref(), patch, now],
+                )?;
+                Ok(())
+            })
+            .map_err(engine_repository_error_from_database)
+    }
+
     /// Parks one running interactive node and merges its completion snapshot in one transaction.
     ///
     /// The guarded update and the payload merge commit together so an observer can never see a
