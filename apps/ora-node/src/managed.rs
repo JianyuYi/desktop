@@ -2,6 +2,8 @@
 #[cfg(test)]
 mod deadline_tests;
 mod delivery;
+#[cfg(test)]
+mod not_started_tests;
 mod repository;
 mod restore;
 #[cfg(test)]

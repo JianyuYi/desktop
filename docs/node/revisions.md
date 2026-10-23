@@ -130,9 +130,18 @@ late ancestor check cannot turn an expired restore into success.
 **Stop confirmation.** Every restore Git intent — the Node's transport repository creation, Git Server
 fetch and `commit_of`, and the workload user's import — is durably associated with its session before
 host admission. The first stop request is persisted before Close; cancellation observes command boundaries
-and does not abandon the blocking worker. Only original Scope `Closed` plus original Run direct-process
-exit permits a terminal result, transport cleanup, delivery or checkout reuse. Linux guardian containment is
-BestEffort; its cleanup evidence does not claim Strong quiescence.
+and does not abandon the blocking worker. Original Scope `Closed` plus either original Run direct-process
+exit or host-authoritative `NotStarted` permits a terminal result, transport cleanup, delivery or checkout
+reuse. Non-launch proof requires matching original Scope/Run identities, `LaunchFact::NotStarted`,
+`DirectProcessState::NotStarted` and completed cleanup together. The host rejects any non-launch report
+that contradicts its persisted confirmed launch, including after restart. A record that the host cannot
+find (`UnknownIdentity`) remains unknown and never grants release.
+
+Host-authoritative non-launch comes from a platform-confirmed spawn failure or cancellation before
+guardian acceptance. The latter requires the current host binding to fence old requests and no Start
+after Stop; an unknown guardian Run without those conditions is not proof. Linux guardian containment
+is BestEffort; cancellation reports `BestEffortComplete`, which does not claim Strong quiescence.
+See the [approved NotStarted extension](https://github.com/ora-space/specs/blob/main/decisions/node/revision/20261021-stop-confirmation-accepts-not-started.md).
 
 If proof is unavailable, the original identities, inputs, terminal intention and checkout conflict
 remain durable. `stop_confirmation_ms` defaults to ten minutes, must be positive, finite and greater

@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 /// Scoped TRACE keeps shared production callsites observable in every test ordering.
-fn with_trace<T>(action: impl FnOnce() -> T) -> T {
+pub(super) fn with_trace<T>(action: impl FnOnce() -> T) -> T {
     let dispatcher = tracing::Dispatch::new(
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
@@ -20,7 +20,7 @@ fn with_trace<T>(action: impl FnOnce() -> T) -> T {
 }
 
 /// A valid resumed session, independent of any plugin or model provider.
-fn session() -> StartAgentSessionMessage {
+pub(super) fn session() -> StartAgentSessionMessage {
     StartAgentSessionMessage {
         protocol_version: CURRENT_PROTOCOL_VERSION,
         operation_id: OperationId::new("restore-op"),
@@ -62,7 +62,7 @@ fn session() -> StartAgentSessionMessage {
 }
 
 /// An IPC responder can withhold each independent part of the required stop evidence.
-async fn answer(
+pub(super) async fn answer(
     mut stream: tokio::net::UnixStream,
     mode: u8,
     attempt: &ora_node_db::ProcessAttempt,
@@ -107,22 +107,41 @@ async fn answer(
         }
         HostOperation::QueryRun { run } => {
             assert_eq!(run, attempt.intent.run);
-            HostReply::Run(HostRunView {
-                scope: attempt.intent.scope,
-                run,
-                stop_requested: true,
-                last_observed: Some(RunSnapshot {
-                    id: run,
-                    launch: LaunchFact::Started,
-                    direct: match mode {
-                        1 => DirectProcessState::Running,
-                        2 => DirectProcessState::Unknown,
-                        _ => DirectProcessState::Exited(ExitOutcome::Code(0)),
+            if mode == 6 {
+                HostReply::Rejected(HostRejection::UnknownIdentity)
+            } else {
+                HostReply::Run(HostRunView {
+                    scope: if mode == 10 {
+                        ScopeId::new()
+                    } else {
+                        attempt.intent.scope
                     },
-                    cleanup: CleanupState::Complete(CleanupEvidence::BestEffortComplete),
-                }),
-                coordination: HostCoordination::Observing,
-            })
+                    run: if mode == 12 { RunId::new() } else { run },
+                    stop_requested: true,
+                    last_observed: Some(RunSnapshot {
+                        id: if mode == 11 { RunId::new() } else { run },
+                        launch: match mode {
+                            5 | 8 => LaunchFact::NotStarted(
+                                "cancelled before guardian acceptance".into(),
+                            ),
+                            9 => LaunchFact::Unknown("launch not observed".into()),
+                            _ => LaunchFact::Started,
+                        },
+                        direct: match mode {
+                            1 => DirectProcessState::Running,
+                            2 => DirectProcessState::Unknown,
+                            5 | 7 | 8 | 9 => DirectProcessState::NotStarted,
+                            _ => DirectProcessState::Exited(ExitOutcome::Code(0)),
+                        },
+                        cleanup: if mode == 8 {
+                            CleanupState::Pending
+                        } else {
+                            CleanupState::Complete(CleanupEvidence::BestEffortComplete)
+                        },
+                    }),
+                    coordination: HostCoordination::Observing,
+                })
+            }
         }
         other => panic!("stop reconciliation invented execution work: {other:?}"),
     };
@@ -138,7 +157,7 @@ fn unknown_stop_matrix_expires_without_terminal_then_original_proof_settles_once
             .build()?
             .block_on(async {
                 ora_logging::initialize_test_clock();
-                for initial in 0..=3 {
+                for initial in [0, 1, 2, 3, 6] {
                     let directory = tempfile::tempdir()?;
                     let input = session();
                     let mut db = NodeDatabase::open(

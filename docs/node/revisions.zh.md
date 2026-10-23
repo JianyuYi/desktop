@@ -98,8 +98,15 @@ git-access 身份没有通过认证，所以会话以可由之后的运行再续
 
 恢复 Git 在 host 接受命令前，把原 Scope/Run 与会话身份一起持久化，Node 身份的命令（建传输仓库、Git Server 拉取、
 `commit_of`）和工作负载身份的导入都在内。首次停止请求先落盘再发 Close；取消只在等待或命令边界生效，不丢弃正在执行的
-阻塞工作线程。只有原 Scope 已观测到 `Closed` 且原 Run 的直接进程已经退出，才允许会话终态、传输仓库清理、交付或
-checkout 复用。当前 Linux guardian 使用 BestEffort，尽力清理完成不等于 Strong 的静止保证。
+阻塞工作线程。原 Scope 已观测到 `Closed`，且原 Run 的直接进程已经退出或 host 权威报告 `NotStarted`，才允许
+会话终态、传输仓库清理、交付或 checkout 复用。未启动证据必须同时匹配原 Scope/Run 身份、`LaunchFact::NotStarted`、
+`DirectProcessState::NotStarted` 和已完成的 cleanup。host 拒绝与持久化的已确认启动事实矛盾的未启动报告，重启后也不例外。
+host 查不到记录时返回的 `UnknownIdentity` 仍属未知，不能授权释放。
+
+权威未启动事实来自平台明确的 spawn 失败，或 guardian 接受启动前的取消。后者必须满足当前 host binding 挡住旧请求，
+且 Stop 之后不再排入 Start；没有这些 fencing 条件的 guardian UnknownRun 不是证据。当前 Linux guardian 使用 BestEffort，
+取消路径报告 `BestEffortComplete`，尽力清理完成不等于 Strong 的静止保证。
+依据为[已批准的 NotStarted 扩展](https://github.com/ora-space/specs/blob/main/decisions/node/revision/20261021-stop-confirmation-accepts-not-started.md)。
 
 部署配置为 `"restore": { "deadline_ms": 300000, "stop_confirmation_ms": 600000 }`。停止确认上限默认十分钟，
 必须为正的有限时长且大于恢复截止；从首次停止请求冻结，重试、重启、重连、配置变更和 Cloud 窗口均不续期。原停止证据未知时

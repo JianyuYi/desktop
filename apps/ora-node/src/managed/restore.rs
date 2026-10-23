@@ -129,7 +129,7 @@ impl RestoreStops {
             .unwrap_or(/*default*/ false)
     }
 
-    /// A Closed scope and an exited direct process are independent required observations.
+    /// Original Scope closure is required before exit or a consistent host-authoritative non-launch.
     async fn prove(&self, attempt: &RestoreAttempt) -> io::Result<bool> {
         let original = &attempt.process;
         let client = ProcessHost::new(original.host_directory.clone(), original.expected_uid);
@@ -139,10 +139,22 @@ impl RestoreStops {
             Duration::from_millis(self.config.cleanup_timeout_ms),
         )
         .await?;
-        Ok(
-            matches!(client.execute(HostOperation::QueryRun { run: original.intent.run }).await?,
-            HostReply::Run(view) if view.last_observed.as_ref().is_some_and(|snapshot| snapshot.id == original.intent.run && matches!(snapshot.direct, DirectProcessState::Exited(_)))),
-        )
+        let reply = client
+            .execute(HostOperation::QueryRun {
+                run: original.intent.run,
+            })
+            .await?;
+        Ok(matches!(reply, HostReply::Run(view)
+        if view.scope == original.intent.scope
+            && view.run == original.intent.run
+            && view.last_observed.as_ref().is_some_and(|snapshot| {
+                snapshot.id == original.intent.run
+                    && (matches!(snapshot.direct, DirectProcessState::Exited(_))
+                        || matches!(
+                            (&snapshot.launch, snapshot.direct, &snapshot.cleanup),
+                            (LaunchFact::NotStarted(_), DirectProcessState::NotStarted, CleanupState::Complete(_))
+                        ))
+            })))
     }
 
     /// Waits only until the persisted first-request bound, then transfers responsibility intact.
