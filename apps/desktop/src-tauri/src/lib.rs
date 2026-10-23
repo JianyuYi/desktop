@@ -359,7 +359,7 @@ async fn restore_desktop_log_level(
     let level = settings
         .preferred_log_level()
         .await
-        .map_err(DesktopBootstrapError::RuntimePreference)?;
+        .map_err(|error| DesktopBootstrapError::RuntimePreference(Box::new(error)))?;
     control.set_level(level)?;
     Ok(level)
 }

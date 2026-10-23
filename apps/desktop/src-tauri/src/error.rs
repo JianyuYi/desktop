@@ -22,13 +22,21 @@ pub enum DesktopBootstrapError {
     #[error("failed to start the process reaper")]
     ProcessReaper(#[source] std::io::Error),
     #[error(transparent)]
-    Backend(#[from] BackendBootstrapError),
+    Backend(Box<BackendBootstrapError>),
     #[error("failed to load the persisted Desktop runtime preference")]
-    RuntimePreference(#[source] BackendError),
+    RuntimePreference(#[source] Box<BackendError>),
     #[error("failed to initialize Desktop update service")]
     Update(#[source] crate::update::UpdateError),
     #[error("failed to schedule automatic marketplace synchronization")]
     MarketplaceSync(#[source] ora_scheduler::SchedulerError),
+}
+
+impl From<BackendBootstrapError> for DesktopBootstrapError {
+    /// Boxes the backend bootstrap failure: it carries the public contract payload, so returning it
+    /// by value would make every desktop bootstrap `Result` large.
+    fn from(error: BackendBootstrapError) -> Self {
+        Self::Backend(Box::new(error))
+    }
 }
 
 /// Serializes the transport-neutral contract directly across the Tauri command seam.
