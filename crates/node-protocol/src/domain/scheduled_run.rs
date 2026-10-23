@@ -11,7 +11,8 @@
 //! artifact bounds are the ones the approved Cloud ADR froze and shared with local scheduled runs;
 //! the crate keeps its own copies because it must stay free of Ora application-domain crates.
 
-use crate::MessageValidationError;
+use crate::domain::revision::StoredObject;
+use crate::{ExecutionId, MessageValidationError};
 use ora_utils::path::StrictRelativePath;
 use serde::{Deserialize, Serialize};
 
@@ -261,4 +262,83 @@ fn is_lower_hex_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Cloud's frozen input for uploading the artifacts of one ended scheduled session.
+///
+/// The declaration itself is not repeated here: the Node reads it from the durable terminal result of
+/// the session it names, so a resent execution cannot smuggle a different set of files past what the
+/// run actually reported.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeliverScheduledArtifactsSpec {
+    /// The ended session execution whose declaration Cloud persisted.
+    pub session_execution_id: ExecutionId,
+}
+
+impl DeliverScheduledArtifactsSpec {
+    /// Requires the session identity this upload is about.
+    pub(crate) fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.session_execution_id.is_empty() {
+            return Err(MessageValidationError::EmptyField {
+                field: "session_execution_id",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The artifacts the Node uploaded, as it measured them; Cloud verifies each before registering it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactsDelivered {
+    pub artifacts: Vec<StoredObject>,
+}
+
+/// Why an upload ended without leaving a registrable object.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledArtifactsFailureReason {
+    /// The checkout, or the reserved directory inside it, could not be read.
+    WorkspaceUnavailable,
+    /// An upload or its grant failed after the retries ran out.
+    UploadFailed,
+    /// The Node holds no declaration for the session, for example after a restart.
+    DeclarationUnavailable,
+    /// The execution was terminated before it reached its own verdict.
+    Interrupted,
+}
+
+/// The terminal failure of an artifact upload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactsFailed {
+    pub reason: ScheduledArtifactsFailureReason,
+}
+
+/// The only terminal result of an artifact upload.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", content = "result", rename_all = "snake_case")]
+pub enum ScheduledArtifactsExecutionResult {
+    Delivered(ScheduledArtifactsDelivered),
+    Failed(ScheduledArtifactsFailed),
+}
+
+impl ScheduledArtifactsExecutionResult {
+    /// Bounds the terminal facts: a delivered result carries at most one object per declared artifact,
+    /// each with a valid key and canonical digest.
+    pub(crate) fn validate(&self) -> Result<(), MessageValidationError> {
+        match self {
+            Self::Delivered(delivered) => {
+                if delivered.artifacts.len() > MAX_SCHEDULED_ARTIFACTS_PER_RUN {
+                    return Err(MessageValidationError::InvalidScheduledArtifactManifest);
+                }
+                delivered
+                    .artifacts
+                    .iter()
+                    .try_for_each(StoredObject::validate)
+            }
+            Self::Failed(_) => Ok(()),
+        }
+    }
 }

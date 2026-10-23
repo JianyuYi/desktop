@@ -4,6 +4,7 @@ mod plugin;
 mod repository;
 mod revision;
 mod runtime_control;
+mod scheduled_artifacts;
 mod session;
 mod thread_preview;
 mod validation;
@@ -33,6 +34,9 @@ pub use revision::{
 pub use runtime_control::{
     ControlledClone, ControlledDeliverRevision, ControlledPlugins, ControlledStartAgentSession,
     RuntimeBinding, RuntimeControlState,
+};
+pub use scheduled_artifacts::{
+    DeliverScheduledArtifacts, DeliverScheduledArtifactsMessage, ScheduledArtifactsResultMessage,
 };
 use serde::{Deserialize, Serialize};
 pub use session::{
@@ -71,6 +75,7 @@ pub enum ControllerToNodeMessage {
     SubmitUserTurn(SubmitUserTurnMessage),
     EndSession(EndSessionMessage),
     DeliverRevision(DeliverRevisionMessage),
+    DeliverScheduledArtifacts(DeliverScheduledArtifactsMessage),
     /// Memory-only: never persisted, logged, or acknowledged.
     UploadGrant(UploadGrantMessage),
 }
@@ -97,6 +102,7 @@ impl ValidateMessage for ControllerToNodeMessage {
             Self::SubmitUserTurn(message) => message.validate(),
             Self::EndSession(message) => message.validate(),
             Self::DeliverRevision(message) => message.validate(),
+            Self::DeliverScheduledArtifacts(message) => message.validate(),
             Self::UploadGrant(message) => message.validate(),
         }
     }
@@ -123,6 +129,7 @@ pub enum NodeToControllerMessage {
     SessionCommandAccepted(SessionCommandAcceptedMessage),
     SessionCommandRejected(SessionCommandRejectedMessage),
     RevisionResult(RevisionResultMessage),
+    ScheduledArtifactsResult(ScheduledArtifactsResultMessage),
     UploadGrantNeeded(UploadGrantNeededMessage),
 }
 
@@ -146,6 +153,7 @@ impl ValidateMessage for NodeToControllerMessage {
             Self::SessionCommandAccepted(message) => message.validate(),
             Self::SessionCommandRejected(message) => message.validate(),
             Self::RevisionResult(message) => message.validate(),
+            Self::ScheduledArtifactsResult(message) => message.validate(),
             Self::UploadGrantNeeded(message) => message.validate(),
         }
     }

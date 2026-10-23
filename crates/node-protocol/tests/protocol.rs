@@ -16,6 +16,8 @@ mod repository_results;
 mod revision;
 #[path = "protocol/revision_restore.rs"]
 mod revision_restore;
+#[path = "protocol/scheduled_artifacts.rs"]
+mod scheduled_artifacts;
 #[path = "protocol/session.rs"]
 mod session;
 #[path = "protocol/support.rs"]
