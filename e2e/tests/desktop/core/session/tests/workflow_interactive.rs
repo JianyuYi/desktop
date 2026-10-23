@@ -3,7 +3,7 @@
 //! These cases drive the user-visible contract end to end: an interactive node parks, the host
 //! restarts, a human turn that never settles blocks the completion, continuing the step works on
 //! both provider reattachment paths, and an explicit completion advances the run. The second case
-//! pins the other half of ADR D6: no message text 鈥?including "缁х画" 鈥?advances a node on its own.
+//! pins the other half of ADR D6: no message text — including "继续" — advances a node on its own.
 
 use super::{
     current_thread_runtime, drain_load, drain_prompt, install_fake_opencode_plugin,
@@ -29,7 +29,7 @@ const LOAD_REFUSAL_MARKER: &str = "refuse_session_load";
 const HOLD_FOR_CANCEL: &str = "[hold-for-cancel]";
 const AGENT_CLI: &str = "official/ora-space.opencode";
 
-/// A graph whose only agent node awaits human input: start 鈫?agent 鈫?output.
+/// A graph whose only agent node awaits human input: start → agent → output.
 fn interactive_graph() -> Value {
     json!({
         "nodes": [
@@ -166,6 +166,13 @@ fn completion_blockers(node: &WorkflowNodeRun) -> Vec<WorkflowNodeCompletionBloc
     serde_json::from_value(payload["completion"]["blockers"].clone()).unwrap_or_default()
 }
 
+/// Reads the parked node's `payload.completion` snapshot as the raw JSON the projection parses.
+fn completion_snapshot(node: &WorkflowNodeRun) -> Value {
+    let payload: Value =
+        serde_json::from_str(node.payload.as_deref().unwrap_or("{}")).unwrap_or(Value::Null);
+    payload["completion"].clone()
+}
+
 /// Sends one human turn on a session and drains it to its stop.
 async fn say(backend: &Backend, session_id: &str, text: &str) -> TestResult {
     drain_prompt(backend.sessions().prompt(PromptSessionRequest {
@@ -204,7 +211,33 @@ async fn restart_scenario(refuse_load: bool) -> TestResult {
             node.status == WorkflowNodeStatus::Pending
         })
         .await?;
-        let session_id = parked.session_id.clone().expect("the node owns a session");
+        // The first park owns its own snapshot. Assert it before any human turn starts: that turn's
+        // cleanup rewrites `payload.completion`, which would hide a wrong first snapshot forever.
+        let first = completion_snapshot(&parked);
+        assert_eq!(
+            first["stopReason"],
+            json!("end_turn"),
+            "the settled first turn parks as end_turn"
+        );
+        assert_eq!(first["provisional"], json!(false));
+        assert!(
+            first["blockers"].as_array().is_some_and(Vec::is_empty),
+            "a settled first turn has no blockers"
+        );
+        assert!(
+            first["turnKey"]["userSeq"]
+                .as_u64()
+                .zip(first["turnKey"]["endedSeq"].as_u64())
+                .is_some_and(|(user_seq, ended_seq)| user_seq < ended_seq),
+            "the snapshot names the settled turn"
+        );
+        assert!(
+            first["outputDigest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:")),
+            "the snapshot pins the output digest"
+        );
+        let session_id = parked.session_id.ok_or("the node owns a session")?;
         (run_id, session_id)
     };
 
@@ -263,7 +296,8 @@ async fn restart_scenario(refuse_load: bool) -> TestResult {
     // Completing it must be refused with the blocker, not advance the run.
     let rejected = complete(&backend, &run_id)
         .await
-        .expect_err("a stopped turn cannot complete without force");
+        .err()
+        .ok_or("a stopped turn cannot complete without force")?;
     assert_eq!(
         rejected.public_error(),
         &PublicError::WorkflowNodeIncomplete(WorkflowNodeIncompleteParams {
@@ -327,7 +361,7 @@ fn a_stopped_step_blocks_completion_and_continues_after_a_restart() -> TestResul
     })
 }
 
-/// A plain conversation saying "缁х画" advances nothing: only an explicit completion moves a node.
+/// A plain conversation saying "继续" advances nothing: only an explicit completion moves a node.
 #[test]
 fn a_plain_conversation_saying_continue_does_not_advance_a_node() -> TestResult {
     current_thread_runtime()?.block_on(async {
@@ -340,7 +374,7 @@ fn a_plain_conversation_saying_continue_does_not_advance_a_node() -> TestResult 
             node.status == WorkflowNodeStatus::Pending
         })
         .await?;
-        let node_session = parked.session_id.clone().expect("bound session");
+        let node_session = parked.session_id.ok_or("bound session")?;
 
         // An ordinary session is not bound to a workflow node, so its turn coordinates nothing.
         let plain = backend
@@ -358,15 +392,12 @@ fn a_plain_conversation_saying_continue_does_not_advance_a_node() -> TestResult 
             run_id: run_id.clone(),
         })?;
         assert_eq!(unchanged.run.status, WorkflowRunStatus::AwaitingInput);
-        assert_eq!(
-            unchanged
-                .nodes
-                .iter()
-                .find(|node| node.node_id == "agent")
-                .expect("agent node")
-                .status,
-            WorkflowNodeStatus::Pending
-        );
+        let agent = unchanged
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "agent")
+            .ok_or("agent node")?;
+        assert_eq!(agent.status, WorkflowNodeStatus::Pending);
         assert!(
             unchanged.nodes.iter().all(|node| node.node_id != "output"),
             "no later node runs from a message alone"
