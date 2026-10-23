@@ -20,7 +20,7 @@
     "@ora/ui": "workspace:*",
     "@tailwindcss/typography": "0.5.20",
     "@tauri-apps/plugin-dialog": "2.7.1",
-    "@tauri-apps/plugin-notification": "2.3.1",
+    "@tauri-apps/plugin-notification": "2.4.0",
     "@tauri-apps/api": "2.11.1",
     "@tailwindcss/vite": "4.3.0",
     "react": "19.2.6",
