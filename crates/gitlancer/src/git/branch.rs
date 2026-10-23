@@ -158,6 +158,7 @@ impl<R: GitRunner> Git<R> {
             request.repository.root().as_path().to_path_buf(),
             vec![
                 "symbolic-ref".to_string(),
+                "--quiet".to_string(),
                 "--short".to_string(),
                 "HEAD".to_string(),
             ],
@@ -166,7 +167,10 @@ impl<R: GitRunner> Git<R> {
         );
         let output = match self.runner().run(&command) {
             Ok(output) => output,
-            Err(GitExecError::NonZeroExit { .. }) => {
+            // `symbolic-ref --quiet` reserves exit status 1 for a detached HEAD. Other
+            // non-zero exits (for example a malformed repository config) must retain their
+            // execution error rather than being misreported as a missing Git project.
+            Err(GitExecError::NonZeroExit { code: Some(1), .. }) => {
                 return Ok(ResolveCurrentBranchResponse { branch: None });
             }
             Err(error) => return Err(GitlancerError::Exec(error)),
