@@ -338,6 +338,13 @@ impl<G: WriteGuard> NodeDatabase<G> {
         if self
             .identity_kind(&ack.operation_id, &ack.execution_id)?
             .as_deref()
+            == Some("deliver_scheduled_artifacts")
+        {
+            return self.acknowledge_scheduled_artifacts(ack);
+        }
+        if self
+            .identity_kind(&ack.operation_id, &ack.execution_id)?
+            .as_deref()
             == Some("plugin")
         {
             return self.acknowledge_plugins(ack);

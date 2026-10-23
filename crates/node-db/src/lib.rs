@@ -12,6 +12,7 @@ mod repository;
 mod repository_model;
 mod revision;
 mod runtime_control;
+mod scheduled_artifacts;
 mod schema;
 mod session;
 pub use execution::owns;
@@ -21,6 +22,9 @@ pub use repository_model::{
     CloneExecution, ClonePhase, CloneProgress, CloneTarget, ClonedCheckout,
 };
 pub use revision::{DeliveryPlan, DeliveryProgress, FrozenOutcome, RevisionDelivery};
+pub use scheduled_artifacts::{
+    ScheduledArtifactDeclaration, ScheduledArtifactsDelivery, ScheduledArtifactsProgress,
+};
 pub use session::{
     CommandAdmission, RestoreAttempt, RestorePhase, SessionCommandInput, SessionCommandSettlement,
     SessionCommandState, SessionExecution, SessionJournal,
