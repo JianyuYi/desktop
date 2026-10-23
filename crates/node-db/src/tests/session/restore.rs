@@ -10,8 +10,8 @@ fn resumed() -> StartAgentSessionMessage {
         revision_id: RevisionId::new("prior"),
         final_commit: CommitId::new("0123456789012345678901234567890123456789"),
         git_repository_url: GitRepositoryUrl::parse("https://git.ora.test/tenant/project.git")
-            .expect("valid repository URL"),
-        delivery_ref: DeliveryRef::parse("refs/ora/deliveries/prior").expect("valid delivery ref"),
+            .unwrap(),
+        delivery_ref: DeliveryRef::parse("refs/ora/deliveries/prior").unwrap(),
         base_commit: CommitId::new("0123456789012345678901234567890123456780"),
     });
     input
