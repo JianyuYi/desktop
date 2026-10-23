@@ -160,6 +160,7 @@ fn declared_files(root: &Path, files: &[(&str, &[u8])]) -> ScheduledArtifactMani
         items,
         rejections: Vec::new(),
         omitted_rejections: 0,
+        walk_truncated: false,
     }
 }
 

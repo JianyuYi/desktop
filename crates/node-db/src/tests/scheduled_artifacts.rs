@@ -49,6 +49,7 @@ fn manifest() -> ScheduledArtifactManifest {
         ],
         rejections: Vec::new(),
         omitted_rejections: 0,
+        walk_truncated: false,
     }
 }
 

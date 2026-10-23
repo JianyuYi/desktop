@@ -82,11 +82,12 @@ Git Server 的暂时性失败最多尝试三次，间隔 5 秒和 30 秒；401�
   绝不逐项配对。
 - Controller 只把该执行派发给声明 `RevisionDelivery` 的 Node，因为它复用该交付的内存授权中继；这个门控
   是有意为之，而不是缺少独立能力。
-- 每个文件重新测量后上传到其授权指定的对象键；2xx 和 412 都算已存储。单个产物失败不会阻止其余产物，但只要任一
-  声明产物未能存储，执行就以 `failed{upload_failed}` 结束：线路上每次执行只有一个结论，这与 Revision 交付对
-  上传采用的聚合规则相同。已存储的对象由 Cloud 自行清理。
+- 每个文件重新测量后上传到其授权指定的对象键；2xx 和 412 都算已存储。单个产物失败不会阻止其余产物；只要有文件
+  已存储，终态就按 delivered 上报这个子集，让 Cloud 逐项登记成功、记录其余拒绝。一个文件都未存下时才以
+  `failed{upload_failed}` 结束。空文件使用相同的大小、摘要和授权路径。Controller 转交会话终态时完整保留清单的
+  未列明拒绝数、遍历截断标记和 `candidate_limit` 原因。
 - 终态 `scheduled_artifacts_result`（序号 1）会重放直到被确认，并共用交付的 outbox。重启后无法续传的尝试以
-  `failed{interrupted}` 上报；Cloud 用新的执行重试，并按运行自己的交付截止结算。
+  `failed{interrupted}` 上报；Cloud 接管这份原终态，按运行冻结的交付截止结算。
 
 ## 恢复上一个 Revision
 

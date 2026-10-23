@@ -216,6 +216,12 @@ pub struct ScheduledArtifactManifest {
     pub items: ::prost::alloc::vec::Vec<ScheduledArtifactItem>,
     #[prost(message, repeated, tag="2")]
     pub rejections: ::prost::alloc::vec::Vec<ScheduledArtifactRejection>,
+    /// Refused candidates whose details did not fit in the bounded rejection list.
+    #[prost(uint32, tag="3")]
+    pub omitted_rejections: u32,
+    /// The walk stopped at its candidate budget; an unknown number was never examined.
+    #[prost(bool, tag="4")]
+    pub walk_truncated: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeliverRevisionSpec {
@@ -498,6 +504,8 @@ pub enum ScheduledArtifactRejectionReason {
     TooMany = 6,
     TotalTooLarge = 7,
     ReadFailed = 8,
+    /// The bounded directory walk stopped before examining every candidate.
+    CandidateLimit = 9,
 }
 impl ScheduledArtifactRejectionReason {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -515,6 +523,7 @@ impl ScheduledArtifactRejectionReason {
             Self::TooMany => "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_MANY",
             Self::TotalTooLarge => "SCHEDULED_ARTIFACT_REJECTION_REASON_TOTAL_TOO_LARGE",
             Self::ReadFailed => "SCHEDULED_ARTIFACT_REJECTION_REASON_READ_FAILED",
+            Self::CandidateLimit => "SCHEDULED_ARTIFACT_REJECTION_REASON_CANDIDATE_LIMIT",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -529,6 +538,7 @@ impl ScheduledArtifactRejectionReason {
             "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_MANY" => Some(Self::TooMany),
             "SCHEDULED_ARTIFACT_REJECTION_REASON_TOTAL_TOO_LARGE" => Some(Self::TotalTooLarge),
             "SCHEDULED_ARTIFACT_REJECTION_REASON_READ_FAILED" => Some(Self::ReadFailed),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_CANDIDATE_LIMIT" => Some(Self::CandidateLimit),
             _ => None,
         }
     }

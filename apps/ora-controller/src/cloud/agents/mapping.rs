@@ -248,6 +248,8 @@ fn reported(value: &ScheduledRunResult) -> proto::ScheduledRunResult {
 /// Maps the declared artifacts and the refused candidates onto the contract's messages.
 fn manifest(value: &ScheduledArtifactManifest) -> proto::ScheduledArtifactManifest {
     proto::ScheduledArtifactManifest {
+        omitted_rejections: value.omitted_rejections,
+        walk_truncated: value.walk_truncated,
         items: value
             .items
             .iter()
@@ -296,10 +298,8 @@ fn manifest(value: &ScheduledArtifactManifest) -> proto::ScheduledArtifactManife
                     ScheduledArtifactRejectionReason::ReadFailed => {
                         proto::ScheduledArtifactRejectionReason::ReadFailed
                     }
-                    // The pinned Cloud contract predates the walk limit; the refusal itself still
-                    // travels, and an unspecified reason is the only spelling Cloud accepts for it.
                     ScheduledArtifactRejectionReason::CandidateLimit => {
-                        proto::ScheduledArtifactRejectionReason::Unspecified
+                        proto::ScheduledArtifactRejectionReason::CandidateLimit
                     }
                 } as i32,
             })
@@ -314,6 +314,32 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     const PRIOR_FINAL: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    /// A cut walk retains its distinct reason and both completeness facts at the Cloud boundary.
+    #[test]
+    fn truncated_artifact_manifest_keeps_its_completeness() {
+        let declaration = ScheduledArtifactManifest {
+            items: Vec::new(),
+            rejections: vec![ScheduledArtifactRejection {
+                display_name: ".ora-scheduled-artifacts".to_owned(),
+                reason: ScheduledArtifactRejectionReason::CandidateLimit,
+            }],
+            omitted_rejections: 448,
+            walk_truncated: true,
+        };
+        assert_eq!(
+            manifest(&declaration),
+            proto::ScheduledArtifactManifest {
+                items: Vec::new(),
+                rejections: vec![proto::ScheduledArtifactRejection {
+                    display_name: ".ora-scheduled-artifacts".to_owned(),
+                    reason: proto::ScheduledArtifactRejectionReason::CandidateLimit as i32,
+                }],
+                omitted_rejections: 448,
+                walk_truncated: true,
+            }
+        );
+    }
     const PRIOR_BASE: &str = "0123456789abcdef0123456789abcdef01234567";
     const REPOSITORY: &str = "https://git.ora.test/6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.git";
     const DELIVERY_REF: &str = "refs/ora/deliveries/revision-1";
@@ -556,7 +582,8 @@ mod tests {
                     display_name: "notes.pdf".to_owned(),
                     reason: ScheduledArtifactRejectionReason::UnsupportedType,
                 }],
-                omitted_rejections: 0,
+                omitted_rejections: 448,
+                walk_truncated: true,
             }),
         });
         let Some(proto::execution_result::Outcome::AgentSessionEnded(mapped)) =
@@ -574,6 +601,8 @@ mod tests {
         assert_eq!(
             mapped.artifact_manifest,
             Some(proto::ScheduledArtifactManifest {
+                omitted_rejections: 448,
+                walk_truncated: true,
                 items: vec![proto::ScheduledArtifactItem {
                     index: 0,
                     display_name: "reports/review.md".to_owned(),

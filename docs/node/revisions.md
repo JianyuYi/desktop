@@ -106,13 +106,14 @@ execution, run after the session ends and before the Workspace can be released:
   it reuses that delivery's memory-only grant relay; the gate is deliberate rather than a missing
   capability.
 - Each file is measured again and uploaded to the key its grant names; 2xx and 412 count as stored. A
-  failed artifact does not stop the others, but any declared artifact that could not be stored ends the
-  execution as `failed{upload_failed}`: the wire carries one verdict for the execution, which is the
-  same aggregate rule a Revision delivery applies to its uploads. Objects already stored stay for
-  Cloud's own cleanup.
+  failed artifact does not stop the others. When any artifact was stored, the terminal result reports
+  that subset as delivered so Cloud can register successes and record the remaining refusals. Only
+  an attempt that stored nothing ends as `failed{upload_failed}`. Empty files use the same measured
+  size/checksum and grant path. The Controller preserves the manifest's omitted-refusal count,
+  walk-truncation flag and `candidate_limit` reason when forwarding the session terminal result.
 - The terminal `scheduled_artifacts_result` (sequence 1) is replayed until acknowledged and shares the
   delivery outbox. A restart reports the attempt it cannot resume as `failed{interrupted}`; Cloud
-  retries with a new execution and settles the run's delivery deadline itself.
+  receives that original terminal fact and settles the run's delivery against its frozen deadline.
 
 ## Restoring a prior Revision
 
