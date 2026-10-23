@@ -3,7 +3,7 @@ use super::{
     TaskWorktreeDeletionMode, TaskWorktreeProvisioner, TaskWorktreeProvisionerError,
 };
 use gitlancer::git::base_branch::ResolveWorktreeBaseCommitRequest;
-use gitlancer::git::branch::ListBranchesRequest;
+use gitlancer::git::branch::{ListBranchesRequest, ResolveCurrentBranchRequest};
 use gitlancer::git::worktree::{
     CreateWorktreeRequest as GitCreateWorktreeRequest,
     DeleteWorktreeRequest as GitDeleteWorktreeRequest, ResolveWorktreeByBranchRequest,
@@ -29,6 +29,22 @@ impl GitTaskWorktreeProvisioner {
             git: Git::new(CliGitRunner),
             repository: Repository::new(RepoRoot::new(project_root)),
         }
+    }
+
+    /// Resolves the repository's current HEAD branch, or `None` when HEAD is detached. The result is
+    /// a plain branch name so callers that fall back to a runtime probe never have to parse git output.
+    pub fn resolve_default_branch(&self) -> Result<Option<String>, TaskWorktreeProvisionerError> {
+        self.git
+            .resolve_current_branch(ResolveCurrentBranchRequest {
+                repository: &self.repository,
+            })
+            .map(|response| response.branch.map(|branch| branch.as_str().to_string()))
+            .map_err(|source| {
+                TaskWorktreeProvisionerError::operation_failed(
+                    "failed to resolve current branch",
+                    source,
+                )
+            })
     }
 }
 

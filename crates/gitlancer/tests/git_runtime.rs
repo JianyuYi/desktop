@@ -6,6 +6,7 @@ use gitlancer::git::base_branch::{
 };
 use gitlancer::git::branch::{
     BranchDeletionMode, CreateBranchRequest, DeleteBranchRequest, ListBranchesRequest,
+    ResolveCurrentBranchRequest,
 };
 use gitlancer::git::commit::{AddRequest, CommitRequest};
 use gitlancer::git::diff::DiffRequest;
@@ -38,6 +39,70 @@ fn runtime_repository(scaffold: &TestScaffold) -> (Git<CliGitRunner>, gitlancer:
         .expect("discover repository");
 
     (git, repository)
+}
+
+/// Verifies the production Git runner returns the attached branch name from the real ref database.
+#[test]
+fn runtime_resolves_attached_head_branch() {
+    let scaffold = TestScaffold::new("runtime-resolves-attached-head").expect("create scaffold");
+    seed_repository(&scaffold);
+    let expected = scaffold
+        .run_git(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .expect("read attached branch")
+        .trim()
+        .to_string();
+    let (git, repository) = runtime_repository(&scaffold);
+
+    let response = git
+        .resolve_current_branch(ResolveCurrentBranchRequest {
+            repository: &repository,
+        })
+        .expect("resolve attached branch");
+
+    assert_eq!(response.branch, Some(BranchName::new(expected)));
+}
+
+/// Verifies the real Git detached-HEAD status is represented as no current branch.
+#[test]
+fn runtime_returns_none_for_detached_head() {
+    let scaffold = TestScaffold::new("runtime-resolves-detached-head").expect("create scaffold");
+    seed_repository(&scaffold);
+    scaffold
+        .run_git(["checkout", "--detach"])
+        .expect("detach HEAD");
+    let (git, repository) = runtime_repository(&scaffold);
+
+    let response = git
+        .resolve_current_branch(ResolveCurrentBranchRequest {
+            repository: &repository,
+        })
+        .expect("resolve detached HEAD");
+
+    assert_eq!(response.branch, None);
+}
+
+/// Verifies a real repository configuration failure is never disguised as a detached HEAD.
+#[test]
+fn runtime_propagates_malformed_repository_config() {
+    let scaffold = TestScaffold::new("runtime-resolves-malformed-config").expect("create scaffold");
+    seed_repository(&scaffold);
+    let (git, repository) = runtime_repository(&scaffold);
+    std::fs::write(scaffold.repo_path().join(".git/config"), "[core\n")
+        .expect("corrupt test repository config");
+
+    let error = git
+        .resolve_current_branch(ResolveCurrentBranchRequest {
+            repository: &repository,
+        })
+        .expect_err("malformed repository config must propagate");
+
+    assert!(matches!(
+        error,
+        gitlancer::GitlancerError::Exec(gitlancer::GitExecError::NonZeroExit {
+            code: Some(128),
+            ..
+        })
+    ));
 }
 
 /// Compares filesystem identity so Windows short names and Git's long paths remain equivalent.

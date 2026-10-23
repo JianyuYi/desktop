@@ -131,6 +131,60 @@ fn retargeting_a_task_freezes_the_new_projects_default_branch() {
 }
 
 #[test]
+fn create_without_persisted_default_branch_probes_the_repository_head() {
+    let repository = Arc::new(MemoryScheduledTaskRepository::default());
+    let handler = CreateScheduledTaskHandler::new(
+        repository.clone(),
+        Arc::new(MemoryProjectRepository::with_projects(vec![Project {
+            id: ProjectId::new("project-1"),
+            name: "project-1".to_string(),
+            repository_kind: "git".to_string(),
+            repository_url: None,
+            default_branch: None,
+            audit_fields: AuditFields::new(NOW, NOW, false),
+        }])),
+        workspaces(),
+        AcceptingTargetValidator,
+        FixedIdGenerator,
+        FixedClock(NOW),
+    );
+
+    handler
+        .handle(create_request())
+        .expect("create with a probed branch");
+
+    assert_eq!(
+        latest_task(&repository).worktree_base_branch,
+        Some("main".to_string())
+    );
+}
+
+#[test]
+fn create_without_persisted_default_branch_rejects_when_probe_fails() {
+    let repository = Arc::new(MemoryScheduledTaskRepository::default());
+    let handler = CreateScheduledTaskHandler::new(
+        repository.clone(),
+        Arc::new(MemoryProjectRepository::with_projects(vec![Project {
+            id: ProjectId::new("project-1"),
+            name: "project-1".to_string(),
+            repository_kind: "git".to_string(),
+            repository_url: None,
+            default_branch: None,
+            audit_fields: AuditFields::new(NOW, NOW, false),
+        }])),
+        workspaces(),
+        RejectingTargetValidator,
+        FixedIdGenerator,
+        FixedClock(NOW),
+    );
+
+    assert_eq!(
+        handler.handle(create_request()),
+        Err(ApplicationError::ScheduledTaskRequiresGitProject)
+    );
+}
+
+#[test]
 fn prepared_definition_is_not_written_until_runtime_eligibility_can_be_checked() {
     let repository = Arc::new(MemoryScheduledTaskRepository::default());
     let handler = create_handler(repository.clone());
@@ -698,6 +752,13 @@ impl ScheduledTaskTargetValidator for AcceptingTargetValidator {
     ) -> Result<(), TaskWorktreeProvisionerError> {
         Ok(())
     }
+
+    fn resolve_default_branch(
+        &self,
+        _project_root: &std::path::Path,
+    ) -> Result<Option<String>, TaskWorktreeProvisionerError> {
+        Ok(Some("main".to_string()))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -708,6 +769,13 @@ impl ScheduledTaskTargetValidator for RejectingTargetValidator {
         &self,
         _project_root: &std::path::Path,
     ) -> Result<(), TaskWorktreeProvisionerError> {
+        Err(TaskWorktreeProvisionerError::NotARepository)
+    }
+
+    fn resolve_default_branch(
+        &self,
+        _project_root: &std::path::Path,
+    ) -> Result<Option<String>, TaskWorktreeProvisionerError> {
         Err(TaskWorktreeProvisionerError::NotARepository)
     }
 }

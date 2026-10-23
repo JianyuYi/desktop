@@ -1,6 +1,6 @@
 use crate::domain::refs::{BranchName, CommitId};
 use crate::domain::repo::Repository;
-use crate::error::{DomainError, GitlancerError};
+use crate::error::{DomainError, GitExecError, GitlancerError};
 use crate::exec::command::{GitCommand, GitIntent};
 use crate::exec::env::GitEnv;
 use crate::exec::runner::GitRunner;
@@ -51,6 +51,18 @@ pub struct DeleteBranchRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteBranchResponse {
     pub branch: BranchName,
+}
+
+/// Carries the repository whose current HEAD branch should be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveCurrentBranchRequest<'a> {
+    pub repository: &'a Repository,
+}
+
+/// Reports the branch HEAD currently points to, or `None` when HEAD is detached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveCurrentBranchResponse {
+    pub branch: Option<BranchName>,
 }
 
 impl<R: GitRunner> Git<R> {
@@ -133,6 +145,43 @@ impl<R: GitRunner> Git<R> {
         Ok(DeleteBranchResponse {
             branch: request.branch_name,
         })
+    }
+
+    /// Resolves the branch HEAD currently points to via `git symbolic-ref --short HEAD`. A detached
+    /// HEAD reports `None` rather than an error, because it is a normal repository state rather than
+    /// a failed operation; a genuine execution failure still propagates.
+    pub fn resolve_current_branch(
+        &self,
+        request: ResolveCurrentBranchRequest<'_>,
+    ) -> Result<ResolveCurrentBranchResponse, GitlancerError> {
+        let command = GitCommand::new(
+            request.repository.root().as_path().to_path_buf(),
+            vec![
+                "symbolic-ref".to_string(),
+                "--quiet".to_string(),
+                "--short".to_string(),
+                "HEAD".to_string(),
+            ],
+            GitEnv::default(),
+            GitIntent::ReadOnly,
+        );
+        let output = match self.runner().run(&command) {
+            Ok(output) => output,
+            // `symbolic-ref --quiet` reserves exit status 1 for a detached HEAD. Other
+            // non-zero exits (for example a malformed repository config) must retain their
+            // execution error rather than being misreported as a missing Git project.
+            Err(GitExecError::NonZeroExit { code: Some(1), .. }) => {
+                return Ok(ResolveCurrentBranchResponse { branch: None });
+            }
+            Err(error) => return Err(GitlancerError::Exec(error)),
+        };
+        let branch = output.stdout.trim();
+        let branch = if branch.is_empty() {
+            None
+        } else {
+            Some(BranchName::new(branch.to_string()))
+        };
+        Ok(ResolveCurrentBranchResponse { branch })
     }
 }
 

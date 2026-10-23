@@ -57,6 +57,13 @@ pub trait ScheduledTaskTargetValidator {
         &self,
         project_root: &Path,
     ) -> Result<(), TaskWorktreeProvisionerError>;
+
+    /// Resolves the project's current HEAD branch, or `None` when HEAD is detached. Callers use this
+    /// as a fallback when the persisted `default_branch` is empty.
+    fn resolve_default_branch(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<String>, TaskWorktreeProvisionerError>;
 }
 
 /// Supplies the fact a scheduler wants to persist for one planned occurrence.

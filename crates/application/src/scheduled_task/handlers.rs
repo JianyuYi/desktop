@@ -108,6 +108,12 @@ where
         let now = self.clock.now_timestamp_millis();
         let project_id = ProjectId::new(request.project_id);
         let project = require_git_project(self.projects.as_ref(), &project_id)?;
+        let branch = resolve_worktree_base_branch(
+            &project,
+            &project_id,
+            self.workspaces.as_ref(),
+            &self.target_validator,
+        )?;
         let approval = request
             .approval_policy
             .map(|policy| approval_from_policy(policy, now));
@@ -127,7 +133,7 @@ where
         )
         .map_err(ApplicationError::from_scheduled_task_domain_error)?;
         task.reanchor_on_enable(now);
-        freeze_worktree_base_branch(&mut task, &project)?;
+        task.freeze_worktree_base_branch(&branch);
         require_activation_approval(&task)?;
         require_active_local_target(&task, self.workspaces.as_ref(), &self.target_validator)?;
 
@@ -323,6 +329,16 @@ where
         let project_id = ProjectId::new(request.project_id);
         let project = require_git_project(self.projects.as_ref(), &project_id)?;
         let project_changed = project_id != existing.project_id;
+        let resolved_branch = if project_changed || existing.worktree_base_branch.is_none() {
+            Some(resolve_worktree_base_branch(
+                &project,
+                &project_id,
+                self.workspaces.as_ref(),
+                &self.target_validator,
+            )?)
+        } else {
+            None
+        };
         let schedule = parse_schedule(request.schedule)?;
         let agent_ref = AgentRef::parse(request.agent_ref)
             .map_err(ApplicationError::from_scheduled_task_domain_error)?;
@@ -370,8 +386,8 @@ where
         } else {
             replacement.preserve_schedule_anchor(&existing);
         }
-        if project_changed || existing.worktree_base_branch.is_none() {
-            freeze_worktree_base_branch(&mut replacement, &project)?;
+        if let Some(branch) = resolved_branch {
+            replacement.freeze_worktree_base_branch(&branch);
         } else {
             replacement.worktree_base_branch = existing.worktree_base_branch.clone();
         }
@@ -541,17 +557,44 @@ where
     Ok(project)
 }
 
-fn freeze_worktree_base_branch(
-    task: &mut ScheduledTask,
+/// Resolves the branch to freeze as the task's worktree base: the project's persisted default when
+/// present, otherwise the repository's current HEAD branch probed from the main workspace. This
+/// fallback keeps existing local Git projects usable even though their `default_branch` was never
+/// persisted (see the open-folder flow).
+fn resolve_worktree_base_branch<Workspaces, TargetValidator>(
     project: &ora_domain::Project,
-) -> Result<(), ApplicationError> {
-    let branch = project
+    project_id: &ProjectId,
+    workspaces: &Workspaces,
+    target_validator: &TargetValidator,
+) -> Result<String, ApplicationError>
+where
+    Workspaces: WorkspaceRepository,
+    TargetValidator: ScheduledTaskTargetValidator,
+{
+    if let Some(branch) = project
         .default_branch
         .as_deref()
         .filter(|branch| !branch.trim().is_empty())
+    {
+        return Ok(branch.to_string());
+    }
+    let workspace = workspaces
+        .find_main_workspace(project_id)
+        .map_err(ApplicationError::from_workspace_repository_error)?
+        .filter(ora_domain::Workspace::is_admissible)
         .ok_or(ApplicationError::ScheduledTaskRequiresGitProject)?;
-    task.freeze_worktree_base_branch(branch);
-    Ok(())
+    let WorkspaceLocation::LocalFilesystem { path } = workspace.location else {
+        return Err(ApplicationError::ScheduledTaskRequiresGitProject);
+    };
+    target_validator
+        .resolve_default_branch(std::path::Path::new(&path))
+        .map_err(|error| match error {
+            TaskWorktreeProvisionerError::NotARepository => {
+                ApplicationError::ScheduledTaskRequiresGitProject
+            }
+            other => ApplicationError::from_task_worktree_provisioner_error(other),
+        })?
+        .ok_or(ApplicationError::ScheduledTaskRequiresGitProject)
 }
 
 fn require_activation_approval(task: &ScheduledTask) -> Result<(), ApplicationError> {

@@ -19,6 +19,16 @@ impl ScheduledTaskTargetValidator for GitScheduledTaskTargetValidator {
         }
         GitTaskWorktreeProvisioner::new(project_root.to_path_buf()).validate_repository()
     }
+
+    fn resolve_default_branch(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<String>, TaskWorktreeProvisionerError> {
+        if !project_root.is_dir() {
+            return Err(TaskWorktreeProvisionerError::NotARepository);
+        }
+        GitTaskWorktreeProvisioner::new(project_root.to_path_buf()).resolve_default_branch()
+    }
 }
 
 #[cfg(test)]
