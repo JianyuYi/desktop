@@ -61,6 +61,9 @@ ora-process-host recover /absolute/private/process-state /absolute/private/bin/o
 - `request_run_stop` 记录强制停止的责任，`request_scope_close` 永久封住准入；两者都在重启后保留，Close 会停止该 Scope 的所有
   Run，但不改写它们的 spec。
 
+已确认启动是持久的正面证据：后续未知观测仍保留 `LaunchFact::Started`。之后的启动事实或直接进程状态若报告 `NotStarted`，
+宿主会拒绝矛盾应答并保留原观测，宿主恢复后也一样。这防止对 guardian 缺失 Run 的取消抹去已知启动事实，进而制造停止确认。
+
 旧的精确日志布局（版本 1 到 5）在事务中迁移。已有 Scope 目录的版本 2 日志会在迁移前被拒绝，因为那些 guardian 仍在使用旧的
 token 协议：保留一个兼容的旧宿主，或使用新的状态目录，永远不要为了强制升级而删除 Scope。不保证已删除的 token 值会从 SQLite
 空闲页或备份中被安全擦除。
