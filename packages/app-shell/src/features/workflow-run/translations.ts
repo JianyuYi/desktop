@@ -281,7 +281,8 @@ export const workflowRunTranslations = {
     "workflowRun.stepCard.forceConfirm": "仍然完成",
     "workflowRun.stepCard.pausedBadge": "已暂停",
     "workflowRun.stepCard.waitingBadge": "等待参与",
-    "workflowRun.stepCard.provisional": "本轮仍在收尾，结果确认后会自动刷新。",
+    "workflowRun.stepCard.provisional":
+      "本轮仍在收尾；点完成时会按本轮重新校验，未结束会给出原因。",
     "workflowRun.stepCard.warning.empty_output":
       "本轮没有文本输出；该节点未声明输出契约，仍可完成。",
     "workflowRun.stepCard.warning.history_integrity_gap":
@@ -767,7 +768,7 @@ export const workflowRunTranslations = {
     "workflowRun.stepCard.pausedBadge": "Paused",
     "workflowRun.stepCard.waitingBadge": "Awaiting input",
     "workflowRun.stepCard.provisional":
-      "This turn is still settling; the card refreshes once it is confirmed.",
+      "This turn is still settling; completing re-checks it and reports a reason if it has not finished.",
     "workflowRun.stepCard.warning.empty_output":
       "This turn had no text output; the node declares no output contract, so it can still complete.",
     "workflowRun.stepCard.warning.history_integrity_gap":

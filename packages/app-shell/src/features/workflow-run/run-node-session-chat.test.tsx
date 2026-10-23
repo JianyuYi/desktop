@@ -251,13 +251,11 @@ describe("RunNodeSessionChat", () => {
       appI18n.t("chat.diagnosticsLastActivity"),
     );
     const group = document.querySelector('[data-subagent-group="child"]');
-    await userEvent
-      .setup()
-      .click(
-        screen.getByRole("button", {
-          name: `${appI18n.t("chat.bindingLocateChildren")} · Worker`,
-        }),
-      );
+    await userEvent.setup().click(
+      screen.getByRole("button", {
+        name: `${appI18n.t("chat.bindingLocateChildren")} · Worker`,
+      }),
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(
       document.querySelectorAll('[data-subagent-group="child"]'),
@@ -773,8 +771,8 @@ describe("RunNodeSessionChat", () => {
     },
   );
 
-  it("marks a provisional blocked turn without claiming a settled result", () => {
-    renderDock(
+  it("offers the ordinary completion for a provisional turn and re-checks it", async () => {
+    const { client } = renderDock(
       "awaiting_input",
       false,
       [],
@@ -783,9 +781,24 @@ describe("RunNodeSessionChat", () => {
       undefined,
       blockedCompletion("turn_unknown", true),
     );
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
 
-    expect(screen.getByTestId("node-step-card")).toHaveTextContent(
-      "本轮仍在收尾，结果确认后会自动刷新。",
+    const card = screen.getByTestId("node-step-card");
+    expect(card).toHaveTextContent("等待参与");
+    expect(card).toHaveTextContent(
+      "本轮仍在收尾；点完成时会按本轮重新校验，未结束会给出原因。",
+    );
+    expect(within(card).queryByTestId("force-complete-node")).toBeNull();
+    expect(screen.getByTestId("complete-current-node")).toBeEnabled();
+
+    await userEvent.click(screen.getByTestId("complete-ready-node"));
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
     );
   });
 

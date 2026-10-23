@@ -37,9 +37,9 @@ const STEP_CARD_COPY = {
     "en-US": "Complete anyway",
   },
   "workflowRun.stepCard.provisional": {
-    "zh-CN": "本轮仍在收尾，结果确认后会自动刷新。",
+    "zh-CN": "本轮仍在收尾；点完成时会按本轮重新校验，未结束会给出原因。",
     "en-US":
-      "This turn is still settling; the card refreshes once it is confirmed.",
+      "This turn is still settling; completing re-checks it and reports a reason if it has not finished.",
   },
   "workflowRun.stepCard.warning.empty_output": {
     "zh-CN": "本轮没有文本输出；该节点未声明输出契约，仍可完成。",

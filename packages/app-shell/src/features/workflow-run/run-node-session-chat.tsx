@@ -114,8 +114,16 @@ export function RunNodeSessionChat({
   // finished. Guessing readiness here would either block a valid completion or hide the check.
   const hasCompletionSnapshot = interaction?.completion !== undefined;
   const completionReady = hasCompletionSnapshot && completion.ready === true;
-  /** The card can still offer a normal completion while the snapshot is unknown. */
-  const completionActionable = completionReady || !hasCompletionSnapshot;
+  // A provisional snapshot is the park path's guess before the turn settled. Its blockers are not
+  // final: `prepare` re-derives the same turn and repairs the snapshot when it can, so the card must
+  // offer the ordinary completion instead of sending the user to a forced one.
+  const completionProvisional =
+    hasCompletionSnapshot && completion.provisional === true;
+  /** The card can still offer a normal completion while the snapshot is unknown or provisional. */
+  const completionActionable =
+    completionReady || completionProvisional || !hasCompletionSnapshot;
+  /** Ready or still settling: both invite the ordinary completion entry. */
+  const completionAwaiting = completionReady || completionProvisional;
 
   useEffect(() => {
     const existing = chatStore.getState().conversations[sessionId];
@@ -277,16 +285,16 @@ export function RunNodeSessionChat({
           </p>
           <Badge
             variant="outline"
-            data-paused={completionReady ? undefined : ""}
+            data-paused={completionAwaiting ? undefined : ""}
             className={cn(
               "text-[10px]",
-              completionReady
+              completionAwaiting
                 ? "border-amber-500/35 bg-amber-500/10 text-amber-900 dark:text-amber-200"
                 : "border-border bg-muted/60 text-muted-foreground",
             )}
           >
             {t(
-              completionReady
+              completionAwaiting
                 ? "workflowRun.stepCard.waitingBadge"
                 : "workflowRun.stepCard.pausedBadge",
             )}
@@ -295,6 +303,10 @@ export function RunNodeSessionChat({
         {completionReady ? (
           <p className="mt-1.5 text-xs text-muted-foreground">
             {t("workflowRun.stepCard.readyHint")}
+          </p>
+        ) : completionProvisional ? (
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("workflowRun.stepCard.provisional")}
           </p>
         ) : hasCompletionSnapshot ? (
           <>
@@ -315,11 +327,6 @@ export function RunNodeSessionChat({
                 </li>
               ))}
             </ul>
-            {completion.provisional && (
-              <p className="mt-1.5 text-[11px] text-muted-foreground/80">
-                {t("workflowRun.stepCard.provisional")}
-              </p>
-            )}
             <p className="mt-1.5 text-[11px] text-muted-foreground/80">
               {t("workflowRun.stepCard.blockedHint")}
             </p>
@@ -377,6 +384,38 @@ export function RunNodeSessionChat({
                 onClick={() => void handleContinue(true)}
               >
                 {t("workflowRun.stepCard.continueChat")}
+              </Button>
+            </>
+          ) : completionProvisional ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="complete-ready-node"
+                disabled={actionDisabled}
+                aria-busy={complete.isPending}
+                onClick={() => handleComplete(false)}
+              >
+                {complete.isPending ? (
+                  <Spinner className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <IconCheck className="size-3.5" aria-hidden="true" />
+                )}
+                {nextNodeTitles.length > 0
+                  ? t("workflowRun.stepCard.readyAction", {
+                      next: nextNodeLabel,
+                    })
+                  : t("workflowRun.stepCard.readyLastAction")}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="continue-current-step"
+                disabled={actionDisabled}
+                onClick={() => void handleContinue(false)}
+              >
+                {t("workflowRun.stepCard.continueStep")}
               </Button>
             </>
           ) : hasCompletionSnapshot ? (
