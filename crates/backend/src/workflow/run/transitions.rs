@@ -1,7 +1,7 @@
 //! Node-run status transitions committed outside the scheduling engine.
 //!
-//! The interactive chain 鈥?an agent node parking at awaiting input after its first turn, a
-//! human follow-up turn beginning, and that turn ending 鈥?commits guarded node-run transitions
+//! The interactive chain — an agent node parking at awaiting input after its first turn, a
+//! human follow-up turn beginning, and that turn ending — commits guarded node-run transitions
 //! directly instead of entering `WorkflowRunEngine`. This sink keeps those commits on the same
 //! discipline as the engine's own transitions (ADR "node runtime orchestration" D7): the
 //! guarded transition commits first, and exactly one run invalidation is published when it
@@ -22,7 +22,7 @@ use std::sync::Arc;
 ///
 /// The sink shares the engine's invalidation mechanism (the same
 /// [`WorkflowRunInvalidationPublisher`] bridge onto the application event hub), so observers
-/// cannot tell an engine-committed transition from an interactive one 鈥?both re-query the same
+/// cannot tell an engine-committed transition from an interactive one — both re-query the same
 /// persisted state.
 pub(crate) struct WorkflowRunTransitions {
     pool: RepositoryPool,
@@ -50,7 +50,7 @@ impl WorkflowRunTransitions {
     ///
     /// The run id is resolved from the committed row: callers such as the turn-cleanup path
     /// hold only the node-run id. A row that vanishes between the commit and the read (a
-    /// concurrent restart) publishes nothing 鈥?a lost event only leaves a stale view that the
+    /// concurrent restart) publishes nothing — a lost event only leaves a stale view that the
     /// next transition or refresh clears.
     pub(crate) fn transition_node_run_status(
         &self,
@@ -77,7 +77,8 @@ impl WorkflowRunTransitions {
     /// Parks one running interactive node with its completion snapshot in the same guarded
     /// transaction, then publishes the run invalidation once the commit succeeds.
     ///
-    /// The sink takes the per-run gate itself (ADR D3 step 4): callers must not already hold it 鈥?    /// the gate is not reentrant 鈥?and must therefore call this from a blocking context. Holding
+    /// The sink takes the per-run gate itself (ADR D3 step 4): callers must not already hold it —
+    /// the gate is not reentrant — and must therefore call this from a blocking context. Holding
     /// the gate across the commit is what makes a park serialize against a completion, a cancel,
     /// and the next scheduling wave instead of relying on the guard alone.
     ///

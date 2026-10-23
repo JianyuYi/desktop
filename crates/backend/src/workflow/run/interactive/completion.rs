@@ -111,7 +111,7 @@ pub(crate) fn revalidate_completion(
 ) -> Result<(), BackendError> {
     let repository = SqliteWorkflowRunEngineRepository::new(pool.clone());
     // Read the node first so every rejection path can name the graph node id, not the node-run id,
-    // in the error 閳?consistent with the prompt-policy rejections.
+    // in the error — consistent with the prompt-policy rejections.
     let node_run = repository
         .find_node_run_by_id(node_run_id)
         .map_err(repository_error)?

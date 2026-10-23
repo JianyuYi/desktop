@@ -1,4 +1,4 @@
-﻿use super::executor::WorkflowRunNodeExecutor;
+use super::executor::WorkflowRunNodeExecutor;
 use super::retry_timer::WorkflowRetryTimers;
 use super::transitions::WorkflowRunTransitions;
 use crate::agent_runtime::AgentRuntimeManager;
@@ -291,7 +291,7 @@ pub(crate) fn reconcile_running_workflow_runs(
                     .unwrap_or(true)
         }) {
             // A run still generating a non-composite row was already failed by the orphan
-            // sweep; stay inert. A `Running` composite row is not generating 鈥?its runtime
+            // sweep; stay inert. A `Running` composite row is not generating — its runtime
             // re-plans from persisted facts, so the run resumes below (ADR "iteration
             // composite runtime" D2).
             continue;
@@ -635,7 +635,7 @@ mod tests {
             );
             engine.start(&run_id).unwrap();
 
-            // start鈫抩utput executes purely in-wave: run start, start-node completion, the
+            // start→output executes purely in-wave: run start, start-node completion, the
             // output wave, the output completion, and the run finish each commit one transition.
             assert_eq!(
                 *published.published.lock().unwrap(),
