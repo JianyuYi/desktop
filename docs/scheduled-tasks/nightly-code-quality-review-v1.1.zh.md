@@ -17,9 +17,9 @@
 
 - **时区**：local 任务不提供时区选择，schedule 按系统当前时区求值；Prompt 会在报告里记录实际时区。
 - **超时**：每次运行固定 60 分钟、不可配，超时记 `failed(timeout)`。
-- **运行终态**：`run.status` / `failure_reason` 由执行层决定，Prompt **不能**改写；业务结论只能写进最终响应。区分「执行成功但质量判定 FAIL」与「执行失败」的能力属未来能力，未实现。
-- **产物持久化**：没有产物存储机制；worktree 无改动会被回收、有改动仅作临时副本，最终响应必须自包含、可从运行历史复核。稳定的产物持久化属未来能力，未实现。
-- **增量范围的近似性**：commit 的提交时间不等于实际合入时间；用 first-parent 时间窗口圈定「上一自然日」是当前近似方案，边缘时刻可能漏记或迟记，Prompt 用 `QA_RANGE_UNRESOLVED` 明确标注无法可信确定范围的情形。
+- **运行终态**：`run.status` / `failure_reason` 由执行层决定，Prompt **不能**改写；业务结论写在最终响应的 `QA_VERDICT:` 哨兵里，由 runtime 解析成独立 verdict 字段（`succeeded` 的运行可独立携带 `fail`）。
+- **产物持久化**：写在 worktree 根下 `.ora-scheduled-artifacts/` 目录内的白名单文件会在收尾时被采集，脱离 worktree 生命周期持久化，随运行历史列出并按 Run ID 访问。
+- **增量范围的近似性**：commit 的提交时间不等于实际合入时间；用 first-parent 时间窗口圈定「上一自然日」是当前近似方案，边缘时刻可能漏记或迟记，Prompt 用 `QA_VERDICT: range_unresolved` 明确标注无法可信确定范围的情形。
 - **漏跑不自动补偿**：local 未运行期间的到期点记 `missed`，不集中补跑。
 
 ## Prompt（V1.1 原文）
@@ -41,7 +41,7 @@
 ### Step 0 — 环境检查
 
 1. 确认仓库、目标分支、远程地址与当前 SHA；记录执行日期、实际系统时区、Agent/模型版本。
-2. `git fetch origin`，失败 → 记 `QA_BLOCKED` 并 STOP。
+2. `git fetch origin`，失败 → 记 `QA_VERDICT: blocked` 并 STOP。
 3. 不触碰用户原始工作目录；不改目标分支；复用仓库已有 QA/CI 指令。
 
 ### Step 1 — 确定增量范围（关键）
@@ -55,7 +55,7 @@
 3. 校验 `BASE_SHA` 是 `TARGET_SHA` 祖先。
 4. 用 `git diff BASE_SHA..TARGET_SHA` 提取真实增量；输出文件数、增删行、提交数、作者、主要模块。
 
-无增量 → `QA_IDLE` STOP；缺基准/异常历史 → `QA_RANGE_UNRESOLVED` STOP，不得猜范围。
+无增量 → `QA_VERDICT: idle` STOP；缺基准/异常历史 → `QA_VERDICT: range_unresolved` STOP，不得猜范围。
 
 ### Step 2 — 增量审查
 
@@ -90,11 +90,13 @@
 
 ### Step 5 — QA_VERDICT
 
-- `QA_PASS`：完成、必需门禁通过、无 Critical/High。
-- `QA_WARN`：无阻断，但有 Medium/Low 或非关键检查缺失。
-- `QA_FAIL`：确认 Critical/High，或必需门禁失败。
-- `QA_BLOCKED`：环境/依赖/超时阻止完成审查。
-- `QA_RANGE_UNRESOLVED`：无法可信确定比较范围。
-- `QA_IDLE`：无增量。
+在最终响应里单独成行，按冻结哨兵 `QA_VERDICT: <pass|warn|fail|blocked|idle|range_unresolved>` 输出，可紧随一行 `QA_DETAIL: <自由文本>`：
+
+- `QA_VERDICT: pass`：完成、必需门禁通过、无 Critical/High。
+- `QA_VERDICT: warn`：无阻断，但有 Medium/Low 或非关键检查缺失。
+- `QA_VERDICT: fail`：确认 Critical/High，或必需门禁失败。
+- `QA_VERDICT: blocked`：环境/依赖/超时阻止完成审查。
+- `QA_VERDICT: range_unresolved`：无法可信确定比较范围。
+- `QA_VERDICT: idle`：无增量。
 
 输出任一 verdict 后 STOP，不进入修复/发布/合并。

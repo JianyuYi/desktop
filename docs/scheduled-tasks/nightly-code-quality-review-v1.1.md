@@ -17,9 +17,9 @@ This page is the reusable prompt baseline (V1.1) for the "nightly code quality r
 
 - **Timezone**: local tasks have no timezone selection; the schedule is evaluated in the system's current timezone. The prompt records the actual timezone in the report.
 - **Timeout**: each run has a fixed 60-minute limit (not configurable); exceeding it ends as `failed(timeout)`.
-- **Run terminal state**: `run.status` / `failure_reason` are decided by the execution layer; the prompt **cannot** rewrite them; the business conclusion only goes into the final response. Distinguishing "execution succeeded but quality verdict FAIL" from "execution failed" is a future capability, not implemented.
-- **Artifact persistence**: there is no artifact storage; the worktree is reclaimed when unmodified and is only a temporary copy when modified, so the final response must be self-contained and reviewable from run history. Durable artifact persistence is a future capability, not implemented.
-- **Delta-scope approximation**: a commit's commit time is not its merge time; using a first-parent time window to bound "the previous natural day" is an approximation, and edge moments may be missed or delayed. The prompt uses `QA_RANGE_UNRESOLVED` to mark cases where a trustworthy range cannot be determined.
+- **Run terminal state**: `run.status` / `failure_reason` are decided by the execution layer; the prompt **cannot** rewrite them; the business conclusion is written in the final response's `QA_VERDICT:` sentinel, which the runtime parses into a separate verdict field (a `succeeded` run can carry `fail`).
+- **Artifact persistence**: whitelisted files written under the `.ora-scheduled-artifacts/` directory at the worktree root are collected at completion and persisted independently of the worktree lifecycle, listed in run history and accessible by run ID.
+- **Delta-scope approximation**: a commit's commit time is not its merge time; using a first-parent time window to bound "the previous natural day" is an approximation, and edge moments may be missed or delayed. The prompt uses `QA_VERDICT: range_unresolved` to mark cases where a trustworthy range cannot be determined.
 - **Missed runs are not compensated**: due points while local is not running are recorded `missed` and are not bulk replayed.
 
 ## Prompt (V1.1 verbatim)
@@ -41,7 +41,7 @@ Perform an unattended overnight quality inspection of the code delta merged into
 ### Step 0 — Environment check
 
 1. Confirm the repository, target branch, remote URL, and current SHA; record the execution date, actual system timezone, and agent/model version.
-2. Run `git fetch origin`; on failure record `QA_BLOCKED` and STOP.
+2. Run `git fetch origin`; on failure record `QA_VERDICT: blocked` and STOP.
 3. Do not touch the user's original working directory; do not modify the target branch; reuse the repository's existing QA/CI commands.
 
 ### Step 1 — Determine the delta scope (critical)
@@ -55,7 +55,7 @@ On the first-parent history of `origin/<base_branch>`, using commit time:
 3. Verify `BASE_SHA` is an ancestor of `TARGET_SHA`.
 4. Extract the real delta with `git diff BASE_SHA..TARGET_SHA`; output file count, added/removed lines, commit count, authors, and major modules.
 
-No delta → `QA_IDLE` STOP; missing baseline / abnormal history → `QA_RANGE_UNRESOLVED` STOP, never guess the scope.
+No delta → `QA_VERDICT: idle` STOP; missing baseline / abnormal history → `QA_VERDICT: range_unresolved` STOP, never guess the scope.
 
 ### Step 2 — Delta review
 
@@ -90,11 +90,15 @@ Do not rely on temporary worktree files persisting — the conclusion must be wr
 
 ### Step 5 — QA_VERDICT
 
-- `QA_PASS`: complete, required gates pass, no Critical/High.
-- `QA_WARN`: no blockers, but Medium/Low risks or non-critical checks missing.
-- `QA_FAIL`: confirmed Critical/High, or a required gate fails.
-- `QA_BLOCKED`: environment/dependency/timeout prevented completing the review.
-- `QA_RANGE_UNRESOLVED`: the comparison range cannot be determined reliably.
-- `QA_IDLE`: no delta.
+In the final response, on its own line, emit the frozen sentinel
+`QA_VERDICT: <pass|warn|fail|blocked|idle|range_unresolved>`, optionally followed by a
+`QA_DETAIL: <free text>` line:
+
+- `QA_VERDICT: pass`: complete, required gates pass, no Critical/High.
+- `QA_VERDICT: warn`: no blockers, but Medium/Low risks or non-critical checks missing.
+- `QA_VERDICT: fail`: confirmed Critical/High, or a required gate fails.
+- `QA_VERDICT: blocked`: environment/dependency/timeout prevented completing the review.
+- `QA_VERDICT: range_unresolved`: the comparison range cannot be determined reliably.
+- `QA_VERDICT: idle`: no delta.
 
 After emitting any verdict, STOP; do not enter fix/release/merge phases.

@@ -6,7 +6,7 @@
 
 ## 已交付的部分
 
-定义用例和历史读取已接入 Desktop。触发点准入（`AdmitScheduledOccurrenceHandler`）和离线缺口记录（`RecordOfflineMissedOccurrenceHandler`）已在 `ora-application` 中实现，但还没有组装进 Backend，所以 Desktop 目前不会触发定时运行。创建或更新 `cloud` 任务会作为无效请求被拒绝。
+定义用例、历史读取与本地调度器已接入 Desktop。触发点准入（`AdmitScheduledOccurrenceHandler`）和离线缺口记录（`RecordOfflineMissedOccurrenceHandler`）已在 `ora-application` 实现并组装进 Backend：`local` 任务在 Desktop 运行时按计划触发，Desktop 未运行期间的到期点记 `missed` 且不补跑。创建或更新 `cloud` 任务会作为无效请求被拒绝。
 
 | 操作 | 效果 |
 |---|---|
