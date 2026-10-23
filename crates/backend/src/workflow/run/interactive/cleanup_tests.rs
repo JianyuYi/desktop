@@ -4,10 +4,11 @@ use super::super::completion_snapshot::{
     CompletionBlocker, CompletionBlockerKind, CompletionSnapshot, TurnKey,
     parse_completion_snapshot,
 };
-use super::session::{begin_human_turn, end_human_turn};
+use super::completion::prepare_completion;
+use super::session::{begin_human_turn, end_human_turn, restore_human_turn};
 use crate::workflow::run::test_fixture::{
-    AGENT_GRAPH, bind_and_park, bootstrap, end_fixture_turn, locks, recording_transitions,
-    run_test, started_run, write_open_turn,
+    AGENT_GRAPH, INTERACTIVE_AGENT_GRAPH, bind_and_park, bootstrap, end_fixture_turn, locks,
+    recording_transitions, run_test, started_run, write_open_turn,
 };
 use agent_client_protocol_schema::v1::StopReason;
 use ora_application::WorkflowRunRepository;
@@ -146,6 +147,77 @@ fn cleanup_parks_provisionally_when_the_turn_never_ends() {
             *recording.published.lock().unwrap(),
             vec![run_id.to_string(), run_id.to_string()],
             "the provisional park still publishes its run invalidation"
+        );
+    });
+}
+
+/// A refused continue prompt restores the parked node and leaves its stopped turn forceable.
+///
+/// The failure happens before the runtime accepts the prompt, so no user message and no new
+/// `TurnEnded` exist. Restoring must put the node back at `Pending` without overwriting the
+/// snapshot of the turn it returned to, or the user could neither continue nor force the step.
+#[test]
+fn a_failed_human_turn_restores_the_previous_snapshot_and_still_forces() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_runs) = started_run(&temp, &pool, INTERACTIVE_AGENT_GRAPH);
+        let agent = node_runs
+            .iter()
+            .find(|node| node.node_id == "agent")
+            .unwrap();
+        let (session_id, node_run_id) = bind_and_park(&pool, agent);
+        let sessions_root = temp.path().join("sessions");
+        let (run_locks, completing) = locks();
+        let (transitions, _recording) = recording_transitions(&pool);
+
+        // The first turn is stopped, so its snapshot parks with the blocker force exists for.
+        begin_human_turn(
+            &pool,
+            &run_locks,
+            &completing,
+            &transitions,
+            session_id.as_ref(),
+        )
+        .await
+        .unwrap();
+        write_open_turn(&sessions_root, session_id.as_ref(), "go", "partial");
+        end_fixture_turn(&sessions_root, session_id.as_ref(), StopReason::Cancelled);
+        end_human_turn(&pool, &sessions_root, &transitions, &node_run_id)
+            .await
+            .unwrap();
+        let stopped =
+            parse_completion_snapshot(parked_node(&pool, &run_id, "agent").payload.as_deref())
+                .expect("the stopped turn parked a snapshot");
+
+        // Admission flips the node to `Running`; the refused prompt restores the parked state.
+        begin_human_turn(
+            &pool,
+            &run_locks,
+            &completing,
+            &transitions,
+            session_id.as_ref(),
+        )
+        .await
+        .unwrap();
+        restore_human_turn(&transitions, &node_run_id)
+            .await
+            .unwrap();
+
+        let restored = parked_node(&pool, &run_id, "agent");
+        assert_eq!(restored.status, WorkflowNodeStatus::Pending);
+        assert_eq!(
+            parse_completion_snapshot(restored.payload.as_deref()),
+            Some(stopped),
+            "a restore must not overwrite the snapshot of the turn it returned to"
+        );
+
+        // The stopped turn is still completable when the user explicitly forces it.
+        let prepared = prepare_completion(&pool, &sessions_root, &run_id, "agent", true)
+            .expect("the restored stopped turn is still forceable");
+        assert_eq!(prepared.output.as_deref(), Some("partial"));
+        assert!(
+            prepared.audit.is_some(),
+            "the forced completion records why it overrode the blocker"
         );
     });
 }
