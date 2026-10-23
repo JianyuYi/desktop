@@ -361,11 +361,16 @@ async fn connected<R: FrameReceiver, W: FrameSender>(
                     continue;
                 }
                 ControllerToNodeMessage::ScheduledArtifactGrants(grants) => {
-                    // Cloud signed one grant per declaration index; a reply naming another set is
-                    // the Controller's protocol violation, never a reason to pair grants with files.
-                    if let Err(error) = info.grants.offer_artifacts(grants) {
-                        return Err(Failure::local(CloseReason::ProtocolViolation, error));
-                    }
+                    // Cloud signed one grant per declaration index; the index itself pairs each
+                    // grant with its artifact, so a reply that no longer matches the outstanding
+                    // set is applied entry by entry instead of closing the connection.
+                    info.grants.offer_artifacts(grants);
+                    continue;
+                }
+                ControllerToNodeMessage::ScheduledArtifactGrantsRefused(refused) => {
+                    // Cloud will not grant this upload again: the executor must settle now
+                    // instead of holding its slot until the process restarts.
+                    info.grants.refuse_artifacts(refused);
                     continue;
                 }
                 message => message,

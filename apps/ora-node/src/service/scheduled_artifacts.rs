@@ -298,17 +298,37 @@ async fn upload<U: ObjectUploader>(
                 continue;
             }
         };
-        let grant = wait_for_artifact_grant(grants, &registration, item.index, policy).await;
-        if !put_artifact(&context, item.index, &grant, &path).await {
+        // Cloud signed the declared size and digest into every grant, so bytes that no longer match
+        // their declaration could only be refused by the object store after a wasted round trip.
+        if size != item.size_bytes || sha256.as_str() != item.sha256.as_str() {
+            ora_logging::ora_warn!(execution_id = %job.execution.as_str(), index = item.index, "declared artifact no longer matches its declaration");
             any_failed = true;
             continue;
         }
-        registration.uploaded_artifact(item.index);
-        stored.push(StoredObject {
-            key: grant.object_key.clone(),
-            size,
-            sha256,
-        });
+        let Some(grant) = wait_for_artifact_grant(grants, &registration, item.index, policy).await
+        else {
+            ora_logging::ora_warn!(execution_id = %job.execution.as_str(), index = item.index, "Cloud will not grant this upload any more");
+            any_failed = true;
+            break;
+        };
+        match put_artifact(&context, item.index, &grant, &path).await {
+            PutOutcome::Stored => {
+                registration.uploaded_artifact(item.index);
+                stored.push(StoredObject {
+                    key: grant.object_key.clone(),
+                    size,
+                    sha256,
+                });
+            }
+            PutOutcome::Failed => any_failed = true,
+            // Cloud withdrew the grants of this execution: no remaining artifact could be stored
+            // either, so the ones already stored are still reported for per-item registration.
+            PutOutcome::Refused => {
+                ora_logging::ora_warn!(execution_id = %job.execution.as_str(), index = item.index, "Cloud will not grant this upload any more");
+                any_failed = true;
+                break;
+            }
+        }
     }
     if any_failed && stored.is_empty() {
         // Cloud settles this family per item: a delivered result registers exactly the objects it
@@ -368,19 +388,23 @@ fn measure(path: &Path) -> io::Result<(u64, Sha256Digest)> {
 }
 
 /// Waits for the grant Cloud issued for one declaration index, repeating the request while none
-/// arrives. Waiting has no deadline: the Controller may be disconnected for a long time.
+/// arrives. Waiting has no time limit while the Controller is merely disconnected, because a
+/// reconnected one can still grant; only Cloud's refusal, which no later reply can undo, ends it.
 async fn wait_for_artifact_grant(
     grants: &GrantStore,
     registration: &Registration,
     index: u32,
     policy: RetryPolicy,
-) -> ObjectUploadGrant {
+) -> Option<ObjectUploadGrant> {
     let mut offers = grants.offers();
     let mut requested: Option<tokio::time::Instant> = None;
     loop {
         offers.borrow_and_update();
         if let Some(grant) = registration.valid_artifact(index, policy.expiry_margin) {
-            return grant;
+            return Some(grant);
+        }
+        if registration.refused() {
+            return None;
         }
         if requested.is_none_or(|at| at.elapsed() >= policy.resend) {
             registration.request();
@@ -399,31 +423,47 @@ struct UploadContext<'a, U: ObjectUploader> {
     policy: RetryPolicy,
 }
 
-/// Sends one artifact with one grant; returns `false` once its attempts are exhausted.
+/// How one artifact's upload ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PutOutcome {
+    /// The object store accepted the bytes: a conditional create stored them, or they were already
+    /// stored by an earlier attempt whose reply was lost.
+    Stored,
+    /// Every attempt for this artifact ran out.
+    Failed,
+    /// Cloud withdrew the upload's grants, so no remaining artifact can be stored either.
+    Refused,
+}
+
+/// Sends one artifact with one grant; a refused grant ends the whole upload, a failed PUT does not.
 async fn put_artifact<U: ObjectUploader>(
     context: &UploadContext<'_, U>,
     index: u32,
     grant: &ObjectUploadGrant,
     path: &Path,
-) -> bool {
+) -> PutOutcome {
     let mut failures = 0;
     let mut current = grant.clone();
     while failures < context.policy.attempts {
         match context.uploader.put(&current, path).await {
             // A repeated PUT after Cloud re-issued the execution finds its own object and is told
             // not to overwrite it; that is success, not a conflict.
-            Ok(200..=299 | 412) => return true,
+            Ok(200..=299 | 412) => return PutOutcome::Stored,
             Ok(403) => {
                 // An expired or revoked signature: only a new grant can succeed.
                 context.registration.discard_artifact(index);
                 ora_logging::ora_warn!(execution_id = %context.job.execution.as_str(), index, "object store refused the upload grant");
-                current = wait_for_artifact_grant(
+                let Some(fresh) = wait_for_artifact_grant(
                     context.grants,
                     context.registration,
                     index,
                     context.policy,
                 )
-                .await;
+                .await
+                else {
+                    return PutOutcome::Refused;
+                };
+                current = fresh;
             }
             Ok(status) => {
                 ora_logging::ora_warn!(execution_id = %context.job.execution.as_str(), index, status, "artifact upload failed");
@@ -436,7 +476,7 @@ async fn put_artifact<U: ObjectUploader>(
         }
         failures += 1;
     }
-    false
+    PutOutcome::Failed
 }
 
 /// A delivered result with the objects the Node measured.

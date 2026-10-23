@@ -18,8 +18,6 @@ mod restore;
 mod snapshot;
 mod upload;
 
-#[cfg(test)]
-pub(crate) use grants::GrantMismatch;
 pub(crate) use grants::{GrantRequest, GrantStore, Registration};
 pub(crate) use prepare::{Preparation, SnapshotMode, prepare};
 pub(crate) use push::{PushJob, Pushed, push};

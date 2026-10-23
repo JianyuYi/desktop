@@ -1,7 +1,8 @@
 //! Uploads against a local HTTP object-store double: Cloud's granted keys, measured digests, the
-//! exact-index reply rule, and the aggregate failure a partial upload reports.
+//! per-index grant rule, a refused upload settling instead of waiting, and the aggregate failure a
+//! partial upload reports.
 use super::*;
-use crate::revision::{GrantMismatch, GrantRequest, GrantStore, RetryPolicy};
+use crate::revision::{GrantRequest, GrantStore, RetryPolicy};
 use ora_utils::http::{ProxyConfig, ReqwestUploader, UploadOptions};
 use pretty_assertions::assert_eq;
 use std::collections::{BTreeMap, VecDeque};
@@ -176,17 +177,22 @@ fn job(root: &Path, manifest: ScheduledArtifactManifest) -> Job {
 }
 
 /// Hands Cloud's grants to the store as the control session would.
-fn offer_grants(
-    grants: &GrantStore,
-    job: &Job,
-    issued: Vec<ScheduledArtifactUploadGrant>,
-) -> Result<(), GrantMismatch> {
+fn offer_grants(grants: &GrantStore, job: &Job, issued: Vec<ScheduledArtifactUploadGrant>) {
     grants.offer_artifacts(ScheduledArtifactGrantsMessage {
         protocol_version: CURRENT_PROTOCOL_VERSION,
         operation_id: job.operation.clone(),
         execution_id: job.execution.clone(),
         payload: ScheduledArtifactGrants { grants: issued },
-    })
+    });
+}
+
+/// Withdraws the upload's grants as the control session would after Cloud's refusal.
+fn refuse_upload(grants: &GrantStore, job: &Job) {
+    grants.refuse_artifacts(ScheduledArtifactGrantsRefusedMessage {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        operation_id: job.operation.clone(),
+        execution_id: job.execution.clone(),
+    });
 }
 
 /// Waits for the next artifact grant request the upload sends.
@@ -203,7 +209,8 @@ async fn requested(
 }
 
 /// Both declared artifacts are uploaded to the keys Cloud granted and reported with the digests the
-/// executor measured; a reply naming a different set is refused whole.
+/// executor measured. A reply that arrives for a smaller set is applied to the index it names: the
+/// later reply completes the set instead of the whole exchange failing.
 #[tokio::test]
 async fn declared_artifacts_upload_to_granted_keys_with_measured_digests() {
     let directory = tempfile::tempdir().unwrap();
@@ -235,44 +242,29 @@ async fn declared_artifacts_upload_to_granted_keys_with_measured_digests() {
             },
         ]
     );
-    // A reply that does not name exactly the requested artifacts is refused as a whole.
-    assert_eq!(
-        offer_grants(
-            &grants,
-            &job,
-            vec![ScheduledArtifactUploadGrant {
-                index: 0,
-                grant: store.grant(
-                    "scheduled-runs/tenant/run/0",
-                    Duration::from_secs(/*secs*/ 3600)
-                ),
-            }],
-        ),
-        Err(GrantMismatch::RequestedSet)
+    // A reply for one artifact of the outstanding set is applied to that index.
+    offer_grants(
+        &grants,
+        &job,
+        vec![ScheduledArtifactUploadGrant {
+            index: 0,
+            grant: store.grant(
+                "scheduled-runs/tenant/run/0",
+                Duration::from_secs(/*secs*/ 3600),
+            ),
+        }],
     );
     assert_eq!(store.received(), vec![]);
-    assert!(
-        offer_grants(
-            &grants,
-            &job,
-            vec![
-                ScheduledArtifactUploadGrant {
-                    index: 0,
-                    grant: store.grant(
-                        "scheduled-runs/tenant/run/0",
-                        Duration::from_secs(/*secs*/ 3600)
-                    ),
-                },
-                ScheduledArtifactUploadGrant {
-                    index: 1,
-                    grant: store.grant(
-                        "scheduled-runs/tenant/run/1",
-                        Duration::from_secs(/*secs*/ 3600)
-                    ),
-                },
-            ],
-        )
-        .is_ok()
+    offer_grants(
+        &grants,
+        &job,
+        vec![ScheduledArtifactUploadGrant {
+            index: 1,
+            grant: store.grant(
+                "scheduled-runs/tenant/run/1",
+                Duration::from_secs(/*secs*/ 3600),
+            ),
+        }],
     );
     assert_eq!(
         running.await.unwrap(),
@@ -344,8 +336,7 @@ async fn a_partial_upload_reports_the_stored_artifacts() {
                 ),
             },
         ],
-    )
-    .unwrap();
+    );
     assert_eq!(
         running.await.unwrap(),
         ScheduledArtifactsExecutionResult::Delivered(ScheduledArtifactsDelivered {
@@ -397,8 +388,7 @@ async fn an_upload_that_stored_nothing_reports_upload_failed() {
                 Duration::from_secs(/*secs*/ 3600),
             ),
         }],
-    )
-    .unwrap();
+    );
     assert_eq!(
         running.await.unwrap(),
         ScheduledArtifactsExecutionResult::Failed(ScheduledArtifactsFailed {
@@ -441,5 +431,237 @@ fn a_missing_declaration_reports_declaration_unavailable() {
     assert_eq!(
         resolve(&db, &command).unwrap_err(),
         ScheduledArtifactsFailureReason::DeclarationUnavailable
+    );
+}
+
+/// Waits until the object store received `count` PUTs, so a test can act between two uploads.
+async fn stored_puts(store: &ObjectStore, count: usize) -> Vec<Put> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(/*secs*/ 10);
+    loop {
+        let received = store.received();
+        if received.len() >= count {
+            return received;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the upload stopped before storing {count} object(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(/*millis*/ 20)).await;
+    }
+}
+
+/// Cloud refuses the remaining grants once the run left `delivering`: the upload settles with what
+/// it already stored instead of holding the Node's slot open for a grant that can never arrive.
+#[tokio::test]
+async fn a_refused_upload_reports_what_it_stored_and_stops() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = declared_files(
+        directory.path(),
+        &[("first.md", b"first"), ("second.md", b"second")],
+    );
+    let stored_digest = manifest.items[0].sha256.clone();
+    let job = job(directory.path(), manifest);
+    let store = ObjectStore::start().await;
+    let grants = GrantStore::new();
+    let mut requests = grants.subscribe();
+    let running = tokio::spawn({
+        let (grants, job) = (grants.clone(), job.clone());
+        async move { upload(&uploader(), &grants, &job, POLICY).await }
+    });
+    requested(&mut requests).await;
+    offer_grants(
+        &grants,
+        &job,
+        vec![ScheduledArtifactUploadGrant {
+            index: 0,
+            grant: store.grant(
+                "scheduled-runs/tenant/run/0",
+                Duration::from_secs(/*secs*/ 3600),
+            ),
+        }],
+    );
+    assert_eq!(stored_puts(&store, /*count*/ 1).await.len(), 1);
+    refuse_upload(&grants, &job);
+    assert_eq!(
+        running.await.unwrap(),
+        ScheduledArtifactsExecutionResult::Delivered(ScheduledArtifactsDelivered {
+            artifacts: vec![StoredObject {
+                key: ObjectKey::new("scheduled-runs/tenant/run/0"),
+                size: b"first".len() as u64,
+                sha256: Sha256Digest::new(stored_digest),
+            }],
+        })
+    );
+    assert_eq!(
+        store
+            .received()
+            .into_iter()
+            .map(|put| put.path)
+            .collect::<Vec<_>>(),
+        vec!["scheduled-runs/tenant/run/0".to_owned()]
+    );
+}
+
+/// A refusal before anything was stored reports the one failure Cloud recognises; nothing was
+/// registered, so there is no delivered subset to name.
+#[tokio::test]
+async fn a_refused_upload_that_stored_nothing_reports_upload_failed() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = declared_files(directory.path(), &[("only.md", b"only")]);
+    let job = job(directory.path(), manifest);
+    let store = ObjectStore::start().await;
+    let grants = GrantStore::new();
+    let mut requests = grants.subscribe();
+    let running = tokio::spawn({
+        let (grants, job) = (grants.clone(), job.clone());
+        async move { upload(&uploader(), &grants, &job, POLICY).await }
+    });
+    requested(&mut requests).await;
+    refuse_upload(&grants, &job);
+    assert_eq!(
+        running.await.unwrap(),
+        ScheduledArtifactsExecutionResult::Failed(ScheduledArtifactsFailed {
+            reason: ScheduledArtifactsFailureReason::UploadFailed,
+        })
+    );
+    assert_eq!(store.received(), vec![]);
+}
+
+/// An expired signature sends the executor back for a fresh grant; Cloud's refusal ends that wait,
+/// so an upload crossing its deadline writes a terminal result instead of running forever.
+#[tokio::test]
+async fn a_refusal_after_an_expired_grant_settles_the_upload() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = declared_files(directory.path(), &[("only.md", b"only")]);
+    let job = job(directory.path(), manifest);
+    let store = ObjectStore::start().await;
+    store.answer("scheduled-runs/tenant/run/0", &[403]);
+    let grants = GrantStore::new();
+    let mut requests = grants.subscribe();
+    let running = tokio::spawn({
+        let (grants, job) = (grants.clone(), job.clone());
+        async move { upload(&uploader(), &grants, &job, POLICY).await }
+    });
+    requested(&mut requests).await;
+    offer_grants(
+        &grants,
+        &job,
+        vec![ScheduledArtifactUploadGrant {
+            index: 0,
+            grant: store.grant(
+                "scheduled-runs/tenant/run/0",
+                Duration::from_secs(/*secs*/ 3600),
+            ),
+        }],
+    );
+    // The refused PUT discards the grant and waits again; the refusal ends that wait.
+    assert_eq!(stored_puts(&store, /*count*/ 1).await.len(), 1);
+    refuse_upload(&grants, &job);
+    assert_eq!(
+        running.await.unwrap(),
+        ScheduledArtifactsExecutionResult::Failed(ScheduledArtifactsFailed {
+            reason: ScheduledArtifactsFailureReason::UploadFailed,
+        })
+    );
+    assert_eq!(store.received().len(), 1);
+}
+
+/// A file that changed after the declaration is refused before any PUT: Cloud signed the declared
+/// size and digest into the grant, so uploading other bytes could only be rejected there.
+#[tokio::test]
+async fn an_artifact_that_no_longer_matches_its_declaration_is_not_uploaded() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = declared_files(directory.path(), &[("only.md", b"only")]);
+    std::fs::write(
+        directory
+            .path()
+            .join(SCHEDULED_ARTIFACT_DIRECTORY)
+            .join("only.md"),
+        b"changed",
+    )
+    .unwrap();
+    let job = job(directory.path(), manifest);
+    let store = ObjectStore::start().await;
+    let grants = GrantStore::new();
+    let mut requests = grants.subscribe();
+    assert_eq!(
+        upload(&uploader(), &grants, &job, POLICY).await,
+        ScheduledArtifactsExecutionResult::Failed(ScheduledArtifactsFailed {
+            reason: ScheduledArtifactsFailureReason::UploadFailed,
+        })
+    );
+    assert_eq!(store.received(), vec![]);
+    assert!(matches!(
+        requests.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+/// A grant for an artifact that is already stored is ignored instead of failing the exchange: a
+/// reply can cross the retry that removed the index from the outstanding set.
+#[tokio::test]
+async fn a_grant_for_an_already_stored_artifact_is_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = declared_files(
+        directory.path(),
+        &[("first.md", b"first"), ("second.md", b"second")],
+    );
+    let job = job(directory.path(), manifest);
+    let store = ObjectStore::start().await;
+    let grants = GrantStore::new();
+    let mut requests = grants.subscribe();
+    let running = tokio::spawn({
+        let (grants, job) = (grants.clone(), job.clone());
+        async move { upload(&uploader(), &grants, &job, POLICY).await }
+    });
+    requested(&mut requests).await;
+    offer_grants(
+        &grants,
+        &job,
+        vec![ScheduledArtifactUploadGrant {
+            index: 0,
+            grant: store.grant(
+                "scheduled-runs/tenant/run/0",
+                Duration::from_secs(/*secs*/ 3600),
+            ),
+        }],
+    );
+    stored_puts(&store, /*count*/ 1).await;
+    // The stale reply repeats index 0, which is no longer outstanding, and adds the missing index.
+    offer_grants(
+        &grants,
+        &job,
+        vec![
+            ScheduledArtifactUploadGrant {
+                index: 0,
+                grant: store.grant(
+                    "scheduled-runs/tenant/run/0",
+                    Duration::from_secs(/*secs*/ 3600),
+                ),
+            },
+            ScheduledArtifactUploadGrant {
+                index: 1,
+                grant: store.grant(
+                    "scheduled-runs/tenant/run/1",
+                    Duration::from_secs(/*secs*/ 3600),
+                ),
+            },
+        ],
+    );
+    assert!(matches!(
+        running.await.unwrap(),
+        ScheduledArtifactsExecutionResult::Delivered(ScheduledArtifactsDelivered { artifacts })
+            if artifacts.len() == 2
+    ));
+    assert_eq!(
+        store
+            .received()
+            .into_iter()
+            .map(|put| put.path)
+            .collect::<Vec<_>>(),
+        vec![
+            "scheduled-runs/tenant/run/0".to_owned(),
+            "scheduled-runs/tenant/run/1".to_owned(),
+        ]
     );
 }

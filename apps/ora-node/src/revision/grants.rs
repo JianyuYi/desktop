@@ -7,14 +7,15 @@
 //!
 //! Two families share the store. A Revision delivery names object keys up front; a scheduled-artifact
 //! upload cannot, because Cloud chooses every key, so it asks by declaration index and only learns
-//! the key from the grant it receives.
+//! the key from the grant it receives. Cloud can also withdraw an upload's grants for good once its
+//! run left `delivering`, which the store records so the executor settles instead of asking forever.
 use ora_node_protocol::{
     CURRENT_PROTOCOL_VERSION, ExecutionId, NodeId, ObjectKey, ObjectUploadGrant, OperationId,
-    ScheduledArtifactGrantNeededMessage, ScheduledArtifactGrantsMessage, ScheduledArtifactUpload,
-    Sha256Digest, UploadGrantMessage, UploadGrantNeeded, UploadGrantNeededMessage,
+    ScheduledArtifactGrantNeededMessage, ScheduledArtifactGrantsMessage,
+    ScheduledArtifactGrantsRefusedMessage, ScheduledArtifactUpload, Sha256Digest,
+    UploadGrantMessage, UploadGrantNeeded, UploadGrantNeededMessage,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::{broadcast, watch};
@@ -44,27 +45,6 @@ pub(crate) enum GrantRequest {
     Artifacts(ScheduledArtifactGrantNeededMessage),
 }
 
-/// Why a grant reply could not be accepted as a whole.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GrantMismatch {
-    /// The reply did not name exactly the artifacts the last request named.
-    RequestedSet,
-    /// No request was outstanding, so the reply answers nothing this Node asked.
-    Unexpected,
-}
-
-impl fmt::Display for GrantMismatch {
-    /// Keeps the protocol violation the session closes with bounded and log-safe.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::RequestedSet => "scheduled-artifact grants do not match the requested artifacts",
-            Self::Unexpected => "scheduled-artifact grants answer no outstanding request",
-        })
-    }
-}
-
-impl std::error::Error for GrantMismatch {}
-
 /// An uploading execution: what it still needs and the grants it holds.
 struct Waiting {
     operation: OperationId,
@@ -74,8 +54,9 @@ struct Waiting {
     /// Declared artifacts still to store, by the index Cloud signs.
     artifacts: BTreeMap<u32, ScheduledArtifactUpload>,
     artifact_grants: HashMap<u32, ObjectUploadGrant>,
-    /// Indices of the last artifact request; a reply must name exactly this set.
-    requested_artifacts: Option<BTreeSet<u32>>,
+    /// Cloud answered that it will grant nothing more for this execution, so the executor settles
+    /// instead of repeating a request that can never be answered.
+    refused: bool,
     /// Set while the upload waits for a grant, so a new connection can repeat the request at once.
     requesting: bool,
 }
@@ -120,39 +101,53 @@ impl GrantStore {
         self.wake();
     }
 
-    /// Accepts artifact grants only when they answer the last request exactly.
+    /// Accepts the grants Cloud signed for the artifacts this execution still has to store.
     ///
-    /// Cloud returns one grant per requested artifact in the same order, but the Node cannot trust
-    /// order alone; the signed indices are the contract. A reply naming another set is refused whole
-    /// instead of being partly applied, so a mistaken grant can never be paired with the wrong file.
-    pub(crate) fn offer_artifacts(
-        &self,
-        message: ScheduledArtifactGrantsMessage,
-    ) -> Result<(), GrantMismatch> {
+    /// The signed declaration index is the contract, not the reply's set: a reply can arrive after
+    /// the Node re-sent its request, or cross a retry that shrank the set, and Cloud answers one
+    /// grant per artifact it was asked about. So each grant is applied to the artifact it names and
+    /// anything the execution no longer has outstanding is ignored. A grant can never be paired with
+    /// the wrong file, because Cloud bound the index's declared size and digest into the signature.
+    pub(crate) fn offer_artifacts(&self, message: ScheduledArtifactGrantsMessage) {
         let mut waiting = self.lock();
         let Some(execution) = waiting.get_mut(&message.execution_id) else {
             ora_logging::ora_warn!(execution_id = %message.execution_id.as_str(), "ignored scheduled-artifact grants for an execution that is not uploading");
-            return Ok(());
+            return;
         };
         if execution.operation != message.operation_id {
             ora_logging::ora_warn!(execution_id = %message.execution_id.as_str(), "ignored scheduled-artifact grants naming another operation");
-            return Ok(());
-        }
-        let Some(requested) = execution.requested_artifacts.clone() else {
-            return Err(GrantMismatch::Unexpected);
-        };
-        let received: BTreeSet<u32> = message.payload.grants.iter().map(|g| g.index).collect();
-        if received != requested {
-            return Err(GrantMismatch::RequestedSet);
+            return;
         }
         for grant in message.payload.grants {
             if execution.artifacts.contains_key(&grant.index) {
                 execution.artifact_grants.insert(grant.index, grant.grant);
+            } else {
+                ora_logging::ora_debug!(execution_id = %message.execution_id.as_str(), index = grant.index, "ignored a scheduled-artifact grant for an artifact that is no longer outstanding");
             }
         }
         drop(waiting);
         self.wake();
-        Ok(())
+    }
+
+    /// Records that Cloud will grant nothing more for this upload, which ends its waiting for good.
+    ///
+    /// Cloud answers `409` once the run left `delivering`, its frozen window has no usable grant
+    /// left, or no object store is configured, and none of those states turns back into a grant for
+    /// this execution. Keeping the executor waiting would hold the Node's upload slot (and the
+    /// delivery's) until the process restarted.
+    pub(crate) fn refuse_artifacts(&self, message: ScheduledArtifactGrantsRefusedMessage) {
+        let mut waiting = self.lock();
+        let Some(execution) = waiting.get_mut(&message.execution_id) else {
+            ora_logging::ora_debug!(execution_id = %message.execution_id.as_str(), "ignored a scheduled-artifact grant refusal for an execution that is not uploading");
+            return;
+        };
+        if execution.operation != message.operation_id {
+            ora_logging::ora_warn!(execution_id = %message.execution_id.as_str(), "ignored a scheduled-artifact grant refusal naming another operation");
+            return;
+        }
+        execution.refused = true;
+        drop(waiting);
+        self.wake();
     }
 
     /// Starts accepting grants for `keys`; dropping the registration forgets them and any grant.
@@ -172,7 +167,7 @@ impl GrantStore {
                 grants: HashMap::new(),
                 artifacts: BTreeMap::new(),
                 artifact_grants: HashMap::new(),
-                requested_artifacts: None,
+                refused: false,
                 requesting: false,
             },
         );
@@ -202,7 +197,7 @@ impl GrantStore {
                 grants: HashMap::new(),
                 artifacts,
                 artifact_grants: HashMap::new(),
-                requested_artifacts: None,
+                refused: false,
                 requesting: false,
             },
         );
@@ -213,11 +208,12 @@ impl GrantStore {
     }
 
     /// The requests of every upload currently waiting for a grant. A new Controller connection
-    /// sends these first: a restarted Controller remembers no earlier request.
+    /// sends these first: a restarted Controller remembers no earlier request. A refused upload is
+    /// not among them, because the answer cannot change for this execution.
     pub(crate) fn pending(&self) -> Vec<GrantRequest> {
         self.lock()
             .iter()
-            .filter(|(_, waiting)| waiting.requesting)
+            .filter(|(_, waiting)| waiting.requesting && !waiting.refused)
             .flat_map(|(execution, waiting)| waiting.requests(execution))
             .collect()
     }
@@ -284,18 +280,31 @@ impl Registration {
     }
 
     /// Returns the grant Cloud issued for `index` when it is still valid, dropping an expired one.
+    ///
+    /// A refused upload hands out nothing: Cloud already answered that it will not register another
+    /// object for this execution, so using a grant it issued earlier could only store bytes nobody
+    /// would ever read.
     pub(crate) fn valid_artifact(&self, index: u32, margin: Duration) -> Option<ObjectUploadGrant> {
         let mut waiting = self.store.lock();
         let execution = waiting.get_mut(&self.execution)?;
-        let usable = execution
-            .artifact_grants
-            .get(&index)
-            .is_some_and(|grant| grant.expires_at > ora_logging::clock::now_local() + margin);
+        let usable = !execution.refused
+            && execution
+                .artifact_grants
+                .get(&index)
+                .is_some_and(|grant| grant.expires_at > ora_logging::clock::now_local() + margin);
         if usable {
             return execution.artifact_grants.get(&index).cloned();
         }
         execution.artifact_grants.remove(&index);
         None
+    }
+
+    /// Whether Cloud withdrew this upload's grants for good, so waiting must end now.
+    pub(crate) fn refused(&self) -> bool {
+        self.store
+            .lock()
+            .get(&self.execution)
+            .is_some_and(|execution| execution.refused)
     }
 
     /// Forgets an artifact grant the store refused, so the next attempt asks for a fresh one.
@@ -315,20 +324,18 @@ impl Registration {
 
     /// Asks the Controller for grants covering every object still to upload, with the digests
     /// frozen before the first PUT so Cloud can bind each grant to exactly those bytes. Artifact
-    /// grants are asked for by declaration index because Cloud chooses their keys.
+    /// grants are asked for by declaration index because Cloud chooses their keys. A refused upload
+    /// stops asking: the answer cannot change for this execution.
     pub(crate) fn request(&self) {
         let messages = {
             let mut waiting = self.store.lock();
             let Some(execution) = waiting.get_mut(&self.execution) else {
                 return;
             };
-            if execution.keys.is_empty() && execution.artifacts.is_empty() {
+            if execution.refused || (execution.keys.is_empty() && execution.artifacts.is_empty()) {
                 return;
             }
             execution.requesting = true;
-            if !execution.artifacts.is_empty() {
-                execution.requested_artifacts = Some(execution.artifacts.keys().copied().collect());
-            }
             execution.requests(&self.execution)
         };
         // No connected session is not an error: the request is repeated while the upload waits.
