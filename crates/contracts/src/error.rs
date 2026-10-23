@@ -548,7 +548,10 @@ mod tests {
         OpenLocationFailedParams, OpenLocationTarget, PackMemberParams,
         PluginConfigurationValidationParams, PluginPackageInvalidParams, PublicError, RequestId,
         SessionMcpSetupFailedParams, SkillFolderConflictParams, TaskBaseBranchNotFoundParams,
-        WorkflowRunInputInvalidParams, WorkflowSnapshotIncompatibleWithResumeParams,
+        WorkflowNodeCompletionBlocker, WorkflowNodeCompletionBlockerKind,
+        WorkflowNodeIncompleteParams, WorkflowNodeOutputChangedParams,
+        WorkflowNodeTurnChangedParams, WorkflowNodeTurnKey, WorkflowRunInputInvalidParams,
+        WorkflowSnapshotIncompatibleWithResumeParams,
     };
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -884,7 +887,10 @@ mod tests {
                 | PublicError::WorkflowRunNotEditable(_)
                 | PublicError::WorkflowNodeNotFound(_)
                 | PublicError::WorkflowNodeNotAwaitingInput(_)
-                | PublicError::WorkflowNodeNotDiagnosable(_) => {}
+                | PublicError::WorkflowNodeNotDiagnosable(_)
+                | PublicError::WorkflowNodeIncomplete(_)
+                | PublicError::WorkflowNodeTurnChanged(_)
+                | PublicError::WorkflowNodeOutputChanged(_) => {}
             }
         }
 
