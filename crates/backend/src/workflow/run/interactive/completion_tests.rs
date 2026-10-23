@@ -67,18 +67,34 @@ fn stored_snapshot(pool: &RepositoryPool, run_id: &WorkflowRunId) -> Option<Comp
         .and_then(|node| parse_completion_snapshot(node.payload.as_deref()))
 }
 
-/// Builds one parked interactive run whose session history root is the caller's directory.
-fn parked_run(
+/// A single interactive agent node whose structured contract rejects anything but `{name}`.
+const INTERACTIVE_STRUCTURED_GRAPH: &str = r#"{"nodes":[
+    {"id":"start","data":{"kind":"start"}},
+    {"id":"agent","data":{"kind":"agent","agentConfig":{"retry":{"enabled":false,"maxRetries":0,"initialDelaySeconds":0},"executor":{"agentCli":"open_code","modelId":"m"},"prompt":"do","interactive":true,"outputContract":{"type":"structured","textExposure":"includeFinalText","schema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}}}
+],"edges":[{"source":"start","target":"agent"}]}"#;
+
+/// Builds one parked interactive run on `graph` whose session history root is the caller's
+/// directory.
+fn parked_run_on(
     temp: &tempfile::TempDir,
     pool: &RepositoryPool,
+    graph: &str,
 ) -> (WorkflowRunId, WorkflowNodeRunId, std::path::PathBuf) {
-    let (run_id, node_runs) = started_run(temp, pool, INTERACTIVE_AGENT_GRAPH);
+    let (run_id, node_runs) = started_run(temp, pool, graph);
     let agent = node_runs
         .iter()
         .find(|node| node.node_id == "agent")
         .expect("agent node");
     let (_session_id, node_run_id) = bind_and_park(pool, agent);
     (run_id, node_run_id, temp.path().join("sessions"))
+}
+
+/// Builds one parked interactive run whose session history root is the caller's directory.
+fn parked_run(
+    temp: &tempfile::TempDir,
+    pool: &RepositoryPool,
+) -> (WorkflowRunId, WorkflowNodeRunId, std::path::PathBuf) {
+    parked_run_on(temp, pool, INTERACTIVE_AGENT_GRAPH)
 }
 
 /// The turn identity is validated before blockers, so a stale completion names its conflict.
@@ -404,6 +420,97 @@ fn forcing_a_stopped_turn_records_the_turn_window() {
                     "output_source": "turn_window",
                 }
             }))
+        );
+    });
+}
+
+/// A forced completion never overrules a turn that changed after the snapshot was taken.
+#[test]
+fn forcing_a_changed_turn_still_reports_the_conflict() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "partial");
+        write_settled_turn(&sessions_root, "session-1", "carry on", "final");
+        store_snapshot(&pool, &node_run_id, &stopped_snapshot());
+
+        let error =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", /*force*/ true)
+                .expect_err("force cannot overrule a superseded turn");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeTurnChanged(ora_contracts::WorkflowNodeTurnChangedParams {
+                node_id: "agent".to_string(),
+                expected: Some(WorkflowNodeTurnKey {
+                    user_seq: 0,
+                    ended_seq: 2,
+                }),
+                actual: Some(WorkflowNodeTurnKey {
+                    user_seq: 3,
+                    ended_seq: 5,
+                }),
+            })
+        );
+    });
+}
+
+/// A forced completion never accepts a final message rewritten under the same turn.
+#[test]
+fn forcing_a_rewritten_output_still_reports_the_conflict() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, node_run_id, sessions_root) = parked_run(&temp, &pool);
+        write_settled_turn(&sessions_root, "session-1", "go", "rewritten");
+        let mut stored = stopped_snapshot();
+        stored.blockers = Vec::new();
+        store_snapshot(&pool, &node_run_id, &stored);
+
+        let error =
+            prepare_completion(&pool, &sessions_root, &run_id, "agent", /*force*/ true)
+                .expect_err("force cannot accept rewritten output");
+
+        assert_eq!(
+            error.public_error(),
+            &PublicError::WorkflowNodeOutputChanged(
+                ora_contracts::WorkflowNodeOutputChangedParams {
+                    node_id: "agent".to_string(),
+                    expected: stored.output_digest.clone(),
+                    actual: Some(format!("sha256:{}", sha256_hex(b"rewritten"))),
+                }
+            )
+        );
+    });
+}
+
+/// A forced completion of a structured contract failure keeps the raw text, claims no structured
+/// output, and records the blocker it overrode.
+#[test]
+fn forcing_a_structured_failure_keeps_raw_output_without_structured_output() {
+    run_test(async {
+        let (temp, pool) = bootstrap();
+        let (run_id, _node_run_id, sessions_root) =
+            parked_run_on(&temp, &pool, INTERACTIVE_STRUCTURED_GRAPH);
+        write_settled_turn(&sessions_root, "session-1", "go", "not json");
+
+        let prepared = prepare_completion(&pool, &sessions_root, &run_id, "agent", true)
+            .expect("force takes the current output");
+
+        assert_eq!(prepared.output.as_deref(), Some("not json"));
+        assert_eq!(prepared.structured_output, None);
+
+        let audit = prepared.audit.expect("a forced completion is audited");
+        let forced = &audit["completion_forced"];
+        assert_eq!(forced["without_turn"], serde_json::json!(false));
+        assert_eq!(forced["output_source"], serde_json::json!("turn_window"));
+        let blockers = forced["blockers"].as_array().expect("blockers");
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0]["kind"], serde_json::json!("structured_invalid"));
+        assert!(
+            blockers[0]["params"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "the audit keeps the validation message"
         );
     });
 }
