@@ -296,6 +296,11 @@ fn manifest(value: &ScheduledArtifactManifest) -> proto::ScheduledArtifactManife
                     ScheduledArtifactRejectionReason::ReadFailed => {
                         proto::ScheduledArtifactRejectionReason::ReadFailed
                     }
+                    // The pinned Cloud contract predates the walk limit; the refusal itself still
+                    // travels, and an unspecified reason is the only spelling Cloud accepts for it.
+                    ScheduledArtifactRejectionReason::CandidateLimit => {
+                        proto::ScheduledArtifactRejectionReason::Unspecified
+                    }
                 } as i32,
             })
             .collect(),
@@ -324,6 +329,8 @@ mod tests {
                 spec: Some(proto::execution_input::Spec::AgentSession(
                     proto::AgentSessionSpec {
                         agent_configuration: None,
+                        // A manual IssueRun carries no scheduled trigger.
+                        trigger: 0,
                         model_binding_id: String::new(),
                         agent_plugin_id: "official/ora-space.echo".into(),
                         agent_plugin_version: "1.2.3".into(),
@@ -549,6 +556,7 @@ mod tests {
                     display_name: "notes.pdf".to_owned(),
                     reason: ScheduledArtifactRejectionReason::UnsupportedType,
                 }],
+                omitted_rejections: 0,
             }),
         });
         let Some(proto::execution_result::Outcome::AgentSessionEnded(mapped)) =

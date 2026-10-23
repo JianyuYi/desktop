@@ -162,6 +162,49 @@ pub trait CoordinationStore: Clone + Send + Sync + 'static {
         async { Ok(GrantOutcome::NotGrantable) }
     }
 
+    /// Cloud scheduled-artifact uploads dispatched to this Node that have no terminal result yet.
+    fn pending_scheduled_artifacts(
+        &self,
+        _node: &NodeId,
+    ) -> impl Future<Output = Result<Vec<DeliverScheduledArtifactsMessage>, Error>> + Send {
+        async { Ok(Vec::new()) }
+    }
+    /// Resolves upload ownership without treating another known execution family as an upload.
+    fn original_scheduled_artifacts_dispatch(
+        &self,
+        _session: &NodeRuntimeIdentity,
+        _operation: &OperationId,
+        _execution: &ExecutionId,
+    ) -> impl Future<Output = Result<Option<DeliverScheduledArtifactsMessage>, Error>> + Send {
+        async { Ok(None) }
+    }
+    /// Obtains fresh runtime authority for a registered upload; `None` means not permitted now.
+    fn dispatch_scheduled_artifacts(
+        &self,
+        _command: DeliverScheduledArtifactsMessage,
+    ) -> impl Future<Output = Result<Option<ControllerToNodeMessage>, Error>> + Send {
+        async { Err(Error::Conflict) }
+    }
+    /// Durably takes over the terminal upload event and its receipt before an acknowledgement.
+    fn take_over_scheduled_artifacts(
+        &self,
+        _session: &NodeRuntimeIdentity,
+        _event: &ScheduledArtifactsResultMessage,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async { Err(Error::Conflict) }
+    }
+    /// Asks the authority for upload grants of declared artifacts, addressed by declaration index
+    /// because Cloud chooses every object key. Grants stay in memory and are never logged.
+    fn grant_scheduled_artifacts(
+        &self,
+        _session: &NodeRuntimeIdentity,
+        _operation: &OperationId,
+        _execution: &ExecutionId,
+        _artifacts: Vec<ScheduledArtifactUpload>,
+    ) -> impl Future<Output = Result<ArtifactGrantOutcome, Error>> + Send {
+        async { Ok(ArtifactGrantOutcome::NotGrantable) }
+    }
+
     /// An advisory wake-up; periodic polling remains authoritative if a hint is missed.
     fn wait_agent_command_hint(&self) -> impl Future<Output = ()> + Send {
         std::future::pending()
@@ -325,4 +368,12 @@ pub enum GrantOutcome {
     NotGrantable,
     /// No checksums are known for a resumed delivery; the Node's `UploadGrantNeeded` will carry them.
     AwaitNode,
+}
+
+/// What an artifact-grant request produced. Deliberately not `Debug` for the same reason.
+pub enum ArtifactGrantOutcome {
+    /// Fresh grants for the Node, each naming the declaration index Cloud signed.
+    Issued(ScheduledArtifactGrantsMessage),
+    /// The upload is no longer grantable; Cloud settles the run's delivery deadline itself.
+    NotGrantable,
 }

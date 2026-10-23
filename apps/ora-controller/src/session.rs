@@ -444,6 +444,22 @@ async fn coordinate<S: CoordinationStore, R: FrameReceiver, W: FrameSender, O: S
                     .map_err(|_| SessionError::Protocol("grant request queue overflow".into()))?;
                 continue;
             }
+            NodeToControllerMessage::ScheduledArtifactGrantNeeded(need) if delivery_capable => {
+                if need.payload.node_id != identity.node_id {
+                    return Err(SessionError::Protocol(
+                        "artifact grant request names another Node".into(),
+                    ));
+                }
+                grants
+                    .input
+                    .try_send(grants::Request::Artifacts {
+                        operation: need.operation_id.clone(),
+                        execution: need.execution_id.clone(),
+                        artifacts: need.payload.artifacts.clone(),
+                    })
+                    .map_err(|_| SessionError::Protocol("grant request queue overflow".into()))?;
+                continue;
+            }
             NodeToControllerMessage::Heartbeat(heartbeat) if heartbeat.payload.node == identity => {
                 continue;
             }

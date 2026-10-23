@@ -184,6 +184,13 @@ async fn poll<S: CoordinationStore>(
                     .into_iter()
                     .map(|c| (c.operation_id, c.execution_id)),
             );
+            commands.extend(
+                store
+                    .pending_scheduled_artifacts(&node)
+                    .await?
+                    .into_iter()
+                    .map(|c| (c.operation_id, c.execution_id)),
+            );
         }
         if !commands.is_empty() {
             let (operation_id, execution_id) = commands[cursor % commands.len()].clone();
@@ -328,6 +335,12 @@ async fn reconcile<S: CoordinationStore>(
                 .await
                 .map_err(|_| Error::Conflict)?;
         }
+        if let NodeToControllerMessage::ScheduledArtifactsResult(event) = &message {
+            output
+                .send(Action::TerminalAccepted(event.execution_id.clone()))
+                .await
+                .map_err(|_| Error::Conflict)?;
+        }
         if let NodeToControllerMessage::PluginsResult(event) = &message {
             output
                 .send(Action::Answered(event.execution_id.clone()))
@@ -385,6 +398,19 @@ async fn reconcile<S: CoordinationStore>(
                 {
                     if delivery_capable {
                         store.dispatch_delivery(delivery).await?
+                    } else {
+                        None
+                    }
+                } else if let Some(upload) = store
+                    .original_scheduled_artifacts_dispatch(
+                        &identity,
+                        &status.operation_id,
+                        &status.execution_id,
+                    )
+                    .await?
+                {
+                    if delivery_capable {
+                        store.dispatch_scheduled_artifacts(upload).await?
                     } else {
                         None
                     }

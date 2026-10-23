@@ -126,7 +126,11 @@ pub(super) fn outcome(result: proto::ExecutionResult) -> Result<ExecutionOutcome
         | proto::execution_result::Outcome::AgentSessionEnded(_)
         | proto::execution_result::Outcome::RevisionDelivered(_)
         | proto::execution_result::Outcome::RevisionUnchanged(_)
-        | proto::execution_result::Outcome::RevisionFailed(_) => return Err(Error::Conflict),
+        | proto::execution_result::Outcome::RevisionFailed(_)
+        | proto::execution_result::Outcome::ScheduledArtifactsDelivered(_)
+        | proto::execution_result::Outcome::ScheduledArtifactsFailed(_) => {
+            return Err(Error::Conflict);
+        }
     })
 }
 

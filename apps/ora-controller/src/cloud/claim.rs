@@ -77,7 +77,7 @@ pub(super) async fn batch(
         };
         let Some(family) = Targeted::of(&item) else {
             if refusals.last.as_deref() != Some(item.operation_id.as_str()) {
-                ora_logging::ora_warn!(operation_id = %item.operation_id, "targeted work names no session or delivery input");
+                ora_logging::ora_warn!(operation_id = %item.operation_id, "targeted work names no session, delivery or artifact input");
                 refusals.last = Some(item.operation_id);
             }
             return Backlog::Settled;
@@ -93,7 +93,9 @@ pub(super) async fn batch(
                     && agents::mapping::frozen_configuration(item.input.as_ref())
                         .is_none_or(|configuration| sandbox.admits(configuration))
             }
-            Targeted::Delivery => sandbox.advertises(NodeCapability::RevisionDelivery),
+            Targeted::Delivery | Targeted::Artifacts => {
+                sandbox.advertises(NodeCapability::RevisionDelivery)
+            }
         };
         // A Node without the capability leaves the item queued in Cloud for a capable session;
         // a session resuming a prior Revision on a Node that cannot restore it would otherwise
@@ -162,6 +164,7 @@ pub(super) async fn record_dispatch(
 enum Targeted {
     Session,
     Delivery,
+    Artifacts,
 }
 
 impl Targeted {
@@ -170,6 +173,7 @@ impl Targeted {
         match item.input.as_ref().and_then(|input| input.spec.as_ref())? {
             proto::execution_input::Spec::AgentSession(_) => Some(Self::Session),
             proto::execution_input::Spec::DeliverRevision(_) => Some(Self::Delivery),
+            proto::execution_input::Spec::DeliverScheduledArtifacts(_) => Some(Self::Artifacts),
             proto::execution_input::Spec::Clone(_)
             | proto::execution_input::Spec::InstallPlugins(_)
             | proto::execution_input::Spec::RemovePlugins(_) => None,
@@ -181,6 +185,7 @@ impl Targeted {
         match self {
             Self::Session => agents::mapping::start(record, node).map(drop),
             Self::Delivery => deliveries::mapping::deliver(record, node).map(drop),
+            Self::Artifacts => deliveries::mapping::scheduled_artifacts(record, node).map(drop),
         }
     }
 }

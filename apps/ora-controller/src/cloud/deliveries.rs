@@ -45,6 +45,144 @@ impl CloudStore {
         Ok(Some(mapping::deliver(&record, &session.node_id)?))
     }
 
+    /// Lists only the scheduled-artifact family; the other polling paths keep their ownership.
+    pub(super) async fn scheduled_artifacts_pending(
+        &self,
+        node: &NodeId,
+    ) -> Result<Vec<DeliverScheduledArtifactsMessage>, Error> {
+        let response = fault::read(async {
+            self.executions()
+                .list_pending_dispatches(self.request(proto::ListPendingDispatchesRequest {
+                    node_id: node.as_str().into(),
+                }))
+                .await
+        })
+        .await
+        .map_err(|v| self.settle(v))?;
+        response
+            .records
+            .iter()
+            .filter(|r| mapping::is_scheduled_artifacts(r))
+            .map(|r| mapping::scheduled_artifacts(r, node))
+            .collect()
+    }
+
+    /// Proves operation, execution and target before deciding whether the record is an upload.
+    pub(super) async fn scheduled_artifacts_command(
+        &self,
+        session: &NodeRuntimeIdentity,
+        operation: &OperationId,
+        execution: &ExecutionId,
+    ) -> Result<Option<DeliverScheduledArtifactsMessage>, Error> {
+        let record = self.owned_record(session, operation, execution).await?;
+        if !mapping::is_scheduled_artifacts(&record) {
+            return Ok(None);
+        }
+        Ok(Some(mapping::scheduled_artifacts(
+            &record,
+            &session.node_id,
+        )?))
+    }
+
+    /// Commits the exact terminal upload and its receipt in Cloud before the session may ACK it.
+    /// Cloud verifies every declared object itself; this adapter never decides a registration.
+    pub(super) async fn scheduled_artifacts_event(
+        &self,
+        session: &NodeRuntimeIdentity,
+        event: &ScheduledArtifactsResultMessage,
+    ) -> Result<(), Error> {
+        event.validate()?;
+        let record = self
+            .owned_record(session, &event.operation_id, &event.execution_id)
+            .await?;
+        if !mapping::is_scheduled_artifacts(&record)
+            || !mapping::accepts_scheduled_artifacts(&event.payload)
+        {
+            ora_logging::ora_error!(
+                execution_id = %event.execution_id.as_str(),
+                "scheduled-artifact result contradicts its dispatched input; it is neither taken over nor acknowledged"
+            );
+            return Err(Error::Conflict);
+        }
+        let epoch = self.epoch()?;
+        let encoded = serde_json::to_vec(event)?;
+        fault::write(|submission_id| {
+            let request = proto::TakeOverNodeEventRequest {
+                submission_id,
+                epoch,
+                operation_id: record.operation_id.clone(),
+                execution_id: record.execution_id.clone(),
+                sequence: event.sequence.value(),
+                result: Some(mapping::scheduled_artifacts_result(session, &event.payload)),
+                event: encoded.clone(),
+            };
+            async move {
+                self.executions()
+                    .take_over_node_event(self.request(request))
+                    .await
+            }
+        })
+        .await
+        // A refused terminal surfaces as a session error here: the quarantine path in the session
+        // is typed for `RevisionResultMessage`, and this family deliberately keeps one terminal
+        // shape instead of duplicating that machinery. Cloud's run deadline still bounds the
+        // attempt, and the Node replays its retained event on a later connection.
+        .map_err(|verdict| self.settle(verdict))?;
+        Ok(())
+    }
+
+    /// Requests Cloud's grants for the declared artifacts the Node named, by declaration index.
+    ///
+    /// Cloud chooses every object key, so the request carries index, size and digest and Cloud
+    /// answers one grant per requested artifact in that order.
+    pub(super) async fn scheduled_artifact_grants(
+        &self,
+        session: &NodeRuntimeIdentity,
+        operation: &OperationId,
+        execution: &ExecutionId,
+        artifacts: Vec<ScheduledArtifactUpload>,
+    ) -> Result<ArtifactGrantOutcome, Error> {
+        let record = match self.owned_record(session, operation, execution).await {
+            Ok(record) => record,
+            Err(Error::Conflict) => return Ok(ArtifactGrantOutcome::NotGrantable),
+            Err(error) => return Err(error),
+        };
+        if record.result.is_some() || !mapping::is_scheduled_artifacts(&record) {
+            return Ok(ArtifactGrantOutcome::NotGrantable);
+        }
+        let epoch = self.epoch()?;
+        let call = async {
+            self.agents()
+                .grant_scheduled_artifact_upload(
+                    self.request(proto::GrantScheduledArtifactUploadRequest {
+                        epoch,
+                        execution_id: record.execution_id.clone(),
+                        artifacts: artifacts
+                            .iter()
+                            .map(|artifact| proto::ScheduledArtifactUpload {
+                                index: artifact.index,
+                                size: artifact.size_bytes,
+                                sha256: artifact.sha256.as_str().into(),
+                            })
+                            .collect(),
+                    }),
+                )
+                .await
+        };
+        // Cloud answers CONFLICT once the upload has a result or its run left `delivering`; the run
+        // settles its own deadline, so a refusal is never turned into an upload failure here.
+        let response = match fault::read(call).await {
+            Ok(response) => response,
+            Err(fault::Verdict::Conflict(_) | fault::Verdict::NotFound) => {
+                return Ok(ArtifactGrantOutcome::NotGrantable);
+            }
+            Err(verdict) => return Err(self.settle(verdict)),
+        };
+        Ok(ArtifactGrantOutcome::Issued(mapping::artifact_grants(
+            response, operation, execution, &artifacts,
+        )?))
+    }
+
     /// The record of a delivery this Node owns, even after Cloud recorded its result.
     async fn delivery_record(
         &self,
