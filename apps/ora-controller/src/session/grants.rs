@@ -91,6 +91,7 @@ async fn run<S: CoordinationStore>(
             accept(&mut seen, &mut pending, request);
         }
         for (execution, (operation, request)) in std::mem::take(&mut pending) {
+            let artifacts = matches!(&request, PendingGrant::Artifacts(_));
             let relayed = match &request {
                 PendingGrant::Revisions(request) => store
                     .grant_upload(&node, &operation, &execution, request.clone())
@@ -118,12 +119,42 @@ async fn run<S: CoordinationStore>(
                     }
                     ora_logging::ora_info!(execution_id = %execution.as_str(), "upload grants relayed to the Node");
                 }
+                // Cloud's refusal is final for this execution, so an upload must hear it: waiting
+                // for a grant that can never be issued would hold the Node's upload slot open.
+                Ok(None) if artifacts => {
+                    ora_logging::ora_info!(execution_id = %execution.as_str(), "Cloud withdrew this upload's grants; the Node settles what it stored");
+                    let refused = ControllerToNodeMessage::ScheduledArtifactGrantsRefused(
+                        ScheduledArtifactGrantsRefusedMessage {
+                            protocol_version: CURRENT_PROTOCOL_VERSION,
+                            operation_id: operation,
+                            execution_id: execution,
+                        },
+                    );
+                    if output.send(refused).await.is_err() {
+                        return Ok(());
+                    }
+                }
                 Ok(None) => {
                     ora_logging::ora_info!(execution_id = %execution.as_str(), "delivery is no longer grantable; Cloud settles its run");
                 }
                 // Nothing was issued; the same request is served once Cloud or the lease is back.
                 Err(Error::Unavailable(_) | Error::Unknown(_) | Error::StaleEligibility) => {
                     pending.entry(execution).or_insert((operation, request));
+                }
+                // Every other failure is deterministic: repeating it cannot produce a grant, so the
+                // upload is told to settle instead of retrying into the same answer.
+                Err(error) if artifacts => {
+                    ora_logging::ora_warn!(execution_id = %execution.as_str(), error = %error, "scheduled-artifact grants cannot be issued; the Node settles what it stored");
+                    let refused = ControllerToNodeMessage::ScheduledArtifactGrantsRefused(
+                        ScheduledArtifactGrantsRefusedMessage {
+                            protocol_version: CURRENT_PROTOCOL_VERSION,
+                            operation_id: operation,
+                            execution_id: execution,
+                        },
+                    );
+                    if output.send(refused).await.is_err() {
+                        return Ok(());
+                    }
                 }
                 Err(error) => {
                     ora_logging::ora_warn!(execution_id = %execution.as_str(), error = %error, "upload grants could not be relayed; the Node asks again");
