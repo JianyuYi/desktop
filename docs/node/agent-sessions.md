@@ -131,7 +131,9 @@ used tools states no verdict, and its artifacts are still declared.
   `omitted_rejections`; when it stops before reading every entry it sets `walk_truncated`, so
   candidates nobody examined are never mistaken for a complete list of refusals. A missing directory
   declares nothing, and Cloud chooses every object key later; Node never writes to the Workspace and
-  never holds an object-store credential.
+  never holds an object-store credential. Uploading the
+  declared files is the separate `deliver_scheduled_artifacts` execution described in
+  [Revisions](revisions.md#scheduled-artifact-uploads).
 
 ## Live previews
 

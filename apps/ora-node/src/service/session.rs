@@ -215,6 +215,18 @@ impl From<TransportError> for Failure {
     }
 }
 
+/// Encodes the store's request as the message its family expects.
+fn grant_request_message(request: crate::revision::GrantRequest) -> NodeToControllerMessage {
+    match request {
+        crate::revision::GrantRequest::Revisions(message) => {
+            NodeToControllerMessage::UploadGrantNeeded(message)
+        }
+        crate::revision::GrantRequest::Artifacts(message) => {
+            NodeToControllerMessage::ScheduledArtifactGrantNeeded(message)
+        }
+    }
+}
+
 /// Reads and validates the next Controller message; `None` is a clean end of the connection.
 async fn receive<R: FrameReceiver>(
     receiver: &mut R,
@@ -348,6 +360,14 @@ async fn connected<R: FrameReceiver, W: FrameSender>(
                     info.grants.offer(grant);
                     continue;
                 }
+                ControllerToNodeMessage::ScheduledArtifactGrants(grants) => {
+                    // Cloud signed one grant per declaration index; a reply naming another set is
+                    // the Controller's protocol violation, never a reason to pair grants with files.
+                    if let Err(error) = info.grants.offer_artifacts(grants) {
+                        return Err(Failure::local(CloseReason::ProtocolViolation, error));
+                    }
+                    continue;
+                }
                 message => message,
             };
             let Ok(permit) = unanswered.clone().try_acquire_owned() else {
@@ -431,11 +451,7 @@ async fn connected<R: FrameReceiver, W: FrameSender>(
     let write = async {
         // A restarted Controller remembers no grant request, so every waiting upload asks again
         // as soon as a Controller connects instead of after its periodic re-send.
-        let pending = info
-            .grants
-            .pending()
-            .into_iter()
-            .map(NodeToControllerMessage::UploadGrantNeeded);
+        let pending = info.grants.pending().into_iter().map(grant_request_message);
         for request in pending {
             timeout(deadline, transmit(writer, &request))
                 .await
@@ -460,7 +476,7 @@ async fn connected<R: FrameReceiver, W: FrameSender>(
                 },
                 message = messages.recv() => { let Some(message) = message else { return Ok::<(), Failure>(()); }; message }
                 request = grant_requests.recv() => match request {
-                    Ok(request) => NodeToControllerMessage::UploadGrantNeeded(request),
+                    Ok(request) => grant_request_message(request),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(Failure::local(CloseReason::InternalError, "grant requests closed"));

@@ -63,6 +63,7 @@ fn event_key(message: &NodeToControllerMessage) -> Option<(&ExecutionId, Sequenc
         NodeToControllerMessage::WorktreeRemoved(m) => Some((&m.execution_id, m.sequence)),
         NodeToControllerMessage::WorktreeRemovalFailed(m) => Some((&m.execution_id, m.sequence)),
         NodeToControllerMessage::RevisionResult(m) => Some((&m.execution_id, m.sequence)),
+        NodeToControllerMessage::ScheduledArtifactsResult(m) => Some((&m.execution_id, m.sequence)),
         NodeToControllerMessage::HelloAccepted(_)
         | NodeToControllerMessage::Heartbeat(_)
         | NodeToControllerMessage::ThreadPreview(_)
@@ -70,6 +71,7 @@ fn event_key(message: &NodeToControllerMessage) -> Option<(&ExecutionId, Sequenc
         | NodeToControllerMessage::RuntimeControlState(_)
         | NodeToControllerMessage::SessionCommandAccepted(_)
         | NodeToControllerMessage::SessionCommandRejected(_)
+        | NodeToControllerMessage::ScheduledArtifactGrantNeeded(_)
         | NodeToControllerMessage::UploadGrantNeeded(_) => None,
     }
 }

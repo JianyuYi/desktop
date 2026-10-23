@@ -86,6 +86,34 @@ The terminal `revision_result` (sequence 1) is replayed until acknowledged; the 
 once it is durable and leftovers are swept at the next start. Shutdown, Controller disconnection and
 cancellation never write a failure; the delivery resumes from its frozen plan after restart.
 
+## Scheduled-artifact uploads
+
+A scheduled run declares its artifacts under `.ora-scheduled-artifacts/`, and Cloud stores that
+declaration without ever seeing the Workspace. `deliver_scheduled_artifacts` is therefore its own
+execution, run after the session ends and before the Workspace can be released:
+
+- `controlled_deliver_scheduled_artifacts` is the production entry: its runtime permit must match this
+  Node, incarnation, operation and execution, checked at admission like every other work kind. The
+  input names only the ended session; the Node reads the declaration back from that session's stored
+  terminal result, so a resent execution cannot choose a different set of files.
+- A missing declaration fails as `declaration_unavailable`; a checkout or reserved directory that
+  cannot be read fails as `workspace_unavailable`.
+- Cloud owns every object key. The Node asks for grants by declaration index with the declared size
+  and digest (`scheduled_artifact_grant_needed`), and Cloud answers one grant per requested artifact in
+  the same order (`scheduled_artifact_grants`). Grants live only in memory. A reply that does not name
+  exactly the requested indices is refused as a whole, never paired item by item.
+- The Controller dispatches this execution only to a Node that advertises `RevisionDelivery`, because
+  it reuses that delivery's memory-only grant relay; the gate is deliberate rather than a missing
+  capability.
+- Each file is measured again and uploaded to the key its grant names; 2xx and 412 count as stored. A
+  failed artifact does not stop the others, but any declared artifact that could not be stored ends the
+  execution as `failed{upload_failed}`: the wire carries one verdict for the execution, which is the
+  same aggregate rule a Revision delivery applies to its uploads. Objects already stored stay for
+  Cloud's own cleanup.
+- The terminal `scheduled_artifacts_result` (sequence 1) is replayed until acknowledged and shares the
+  delivery outbox. A restart reports the attempt it cannot resume as `failed{interrupted}`; Cloud
+  retries with a new execution and settles the run's delivery deadline itself.
+
 ## Restoring a prior Revision
 
 A session with `prior_revision` (its identity, final and base commits, `git_repository_url` and

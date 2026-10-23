@@ -1,4 +1,7 @@
-use super::{clones::Clones, plugins::Plugins, revisions::Revisions, *};
+use super::{
+    clones::Clones, plugins::Plugins, revisions::Revisions,
+    scheduled_artifacts::ScheduledArtifacts, *,
+};
 use crate::{ManagedNode, Node};
 use ora_node_db::Error as StorageError;
 use ora_node_transport::CloseReason;
@@ -70,6 +73,8 @@ pub(super) fn run(
         let grants = crate::revision::GrantStore::new();
         let revisions =
             Revisions::start(&node, grants.clone(), shutdown.clone()).map_err(|e| e.to_string())?;
+        let scheduled =
+            ScheduledArtifacts::start(&mut node, grants.clone()).map_err(|e| e.to_string())?;
         let restore_policy = config.restore.policy().map_err(|error| error.to_string())?;
         let stops = crate::managed::RestoreStops::new(
             node.database
@@ -100,17 +105,26 @@ pub(super) fn run(
         )
         .map_err(|e| e.to_string())?;
         Ok::<_, String>((
-            node, controller, clones, plugins, agents, grants, revisions, stops,
+            node, controller, clones, plugins, agents, grants, revisions, scheduled, stops,
         ))
     })();
-    let (mut node, controller, mut clones, mut plugins, agents, grants, mut revisions, stops) =
-        match initialized {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = ready.send(Err(error.clone()));
-                return Err(error);
-            }
-        };
+    let (
+        mut node,
+        controller,
+        mut clones,
+        mut plugins,
+        agents,
+        grants,
+        mut revisions,
+        mut scheduled,
+        stops,
+    ) = match initialized {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = ready.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
     let mut capabilities = vec![
         NodeCapability::PluginInstall,
         NodeCapability::RuntimeControl,
@@ -152,6 +166,7 @@ pub(super) fn run(
         if let Some(revisions) = revisions {
             revisions.finish(&mut node).map_err(|e| e.to_string())?;
         }
+        scheduled.finish(&mut node).map_err(|e| e.to_string())?;
         clones.drain(&mut node, Duration::ZERO)?;
         return node.shutdown().map_err(|e| e.to_string());
     }
@@ -219,6 +234,7 @@ pub(super) fn run(
                     .advance(&mut node, agents.as_ref())
                     .map_err(|e| e.to_string())?;
             }
+            scheduled.advance(&mut node).map_err(|e| e.to_string())?;
         }
         Ok(())
     })();
@@ -229,6 +245,7 @@ pub(super) fn run(
     let revisions_finished = revisions
         .map_or(Ok(()), |revisions| revisions.finish(&mut node))
         .map_err(|e| e.to_string());
+    let scheduled_finished = scheduled.finish(&mut node).map_err(|e| e.to_string());
     let agents_finished = if agents.as_ref().is_some_and(agents::SessionHost::failed) {
         Err("Agent terminal persistence failed".to_owned())
     } else {
@@ -240,6 +257,7 @@ pub(super) fn run(
         .and(drained)
         .and(plugins_finished)
         .and(revisions_finished)
+        .and(scheduled_finished)
         .and(agents_finished)
 }
 
@@ -473,6 +491,35 @@ fn handle(
             let record = node.database.accept_controlled_delivery(&envelope)?;
             Ok(delivery_status(node, record))
         }
+        Request::Message(ControllerToNodeMessage::DeliverScheduledArtifacts(command)) => {
+            if controlled {
+                return Err(crate::Error::UnsupportedMessage);
+            }
+            node.database.check_controller_execution(
+                controller,
+                &command.operation_id,
+                &command.execution_id,
+            )?;
+            let record = node.database.accept_scheduled_artifacts(&command)?;
+            Ok(scheduled_status(node, record))
+        }
+        Request::Message(ControllerToNodeMessage::ControlledDeliverScheduledArtifacts(
+            envelope,
+        )) => {
+            envelope.validate()?;
+            if envelope.binding.node_incarnation_id != node.identity().incarnation_id.as_str() {
+                return Err(StorageError::NodeMismatch.into());
+            }
+            node.database.check_controller_execution(
+                controller,
+                &envelope.command.operation_id,
+                &envelope.command.execution_id,
+            )?;
+            let record = node
+                .database
+                .accept_controlled_scheduled_artifacts(&envelope)?;
+            Ok(scheduled_status(node, record))
+        }
         // The session read loop consumes Controller heartbeats and transfer grants; they never
         // reach admission. Worktree executions are refused until this service implements them;
         // it does not advertise their capability, so a conforming Controller never sends them.
@@ -481,6 +528,7 @@ fn handle(
             | ControllerToNodeMessage::Heartbeat(_)
             | ControllerToNodeMessage::EnsureWorktree(_)
             | ControllerToNodeMessage::RemoveWorktree(_)
+            | ControllerToNodeMessage::ScheduledArtifactGrants(_)
             | ControllerToNodeMessage::UploadGrant(_),
         ) => Err(crate::Error::UnsupportedMessage),
     }
@@ -522,6 +570,14 @@ fn plugin_status(
             },
         },
     )]
+}
+
+/// Admission reports the durable state; the upload executor picks the execution up on its own.
+fn scheduled_status(
+    node: &ManagedNode,
+    record: ora_node_db::ScheduledArtifactsDelivery,
+) -> Vec<NodeToControllerMessage> {
+    super::scheduled_artifacts::status(node, record)
 }
 
 /// Admission reports the durable state; the delivery executor picks the execution up on its own.

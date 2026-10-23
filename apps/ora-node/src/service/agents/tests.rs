@@ -421,10 +421,38 @@ fn startup_recovery_ends_a_restore_proven_by_the_sequence_the_controller_acked()
         assert!(node.database.pending_events()?.is_empty());
     }
     // A Node still on v10 opens the file and rebuilds the restore ledger from real history.
+    // The downgrade also restores the v10 identity check and terminal-event outbox, which v12
+    // widened; the schema check compares their exact SQL text.
+    let revision_schema = include_str!("../../../../../crates/node-db/src/revision.sql");
+    let identities = revision_schema
+        .split("CREATE TABLE execution_identities")
+        .nth(1)
+        .ok_or("missing v9 identity schema")?
+        .split("INSERT INTO execution_identities")
+        .next()
+        .ok_or("missing v9 identity columns")?;
+    let outbox = revision_schema
+        .split("CREATE TABLE revision_outbox")
+        .nth(1)
+        .ok_or("missing v9 outbox schema")?
+        .split("CREATE TRIGGER")
+        .next()
+        .ok_or("missing v9 outbox columns")?;
     let connection = rusqlite::Connection::open(home.join("ora-node.sqlite3"))?;
-    connection.execute_batch(
-        "PRAGMA foreign_keys=OFF; DROP TABLE restore_process_attempts; DROP TABLE session_restores; PRAGMA user_version=10;",
-    )?;
+    connection.execute_batch(&format!(
+        "PRAGMA foreign_keys=OFF;
+        DROP TRIGGER bind_new_scheduled_artifact; DROP TABLE scheduled_artifact_deliveries;
+        DROP TABLE restore_process_attempts; DROP TABLE session_restores;
+        CREATE TEMP TABLE v10_ids AS SELECT * FROM execution_identities;
+        DROP TABLE execution_identities;
+        CREATE TABLE execution_identities{identities}
+        INSERT INTO execution_identities SELECT * FROM v10_ids; DROP TABLE v10_ids;
+        CREATE TEMP TABLE v10_events AS SELECT * FROM revision_outbox;
+        DROP TABLE revision_outbox;
+        CREATE TABLE revision_outbox{outbox}
+        INSERT INTO revision_outbox SELECT * FROM v10_events; DROP TABLE v10_events;
+        PRAGMA user_version=10;"
+    ))?;
     drop(connection);
     let mut node = crate::Node::open(
         node_config(&deployment),
