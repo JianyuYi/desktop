@@ -138,6 +138,43 @@ fn render_current_step(node: &WorkflowGraphNode, locale: WorkflowRunLocale) -> S
     text
 }
 
+/// Renders the step boundary every human turn of an interactive node carries.
+///
+/// The block states the step's scope and its direct successors so a follow-up message cannot be
+/// mistaken for permission to run them. It deliberately claims nothing the runtime enforces: no
+/// text in it says further nodes are blocked, and it names no client control.
+pub(crate) fn render_step_boundary(
+    graph: &WorkflowGraph,
+    node: &WorkflowGraphNode,
+    locale: WorkflowRunLocale,
+) -> String {
+    let copy = prompt_copy(locale);
+    let successors = graph.successors(&node.id);
+    let ordered_nodes = graph.nodes_in_topological_order();
+    let order_by_id: HashMap<&str, usize> = ordered_nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), index))
+        .collect();
+    let successors = sort_nodes_by_topology(successors, &order_by_id);
+    let successors = if successors.is_empty() {
+        copy.step_boundary_last_step.to_string()
+    } else {
+        node_list(successors, locale)
+    };
+    format!(
+        "<workflow_step_boundary>\n{}\n{}: {}\n{}: {successors}\n{}: {}\n{}: {}\n</workflow_step_boundary>",
+        copy.step_boundary_intro,
+        copy.step,
+        node_label(node),
+        copy.direct_successors,
+        copy.step_boundary_scope,
+        copy.step_boundary_scope_detail,
+        copy.step_boundary_next_step,
+        copy.step_boundary_next_step_detail,
+    )
+}
+
 /// Wraps a resolved role in explicit behavioral instructions instead of appending it raw.
 fn render_role_definition(
     node: &WorkflowGraphNode,
@@ -388,6 +425,12 @@ struct PromptCopy {
     previous_failure_kind: &'static str,
     previous_failure_message: &'static str,
     previous_failure_output: &'static str,
+    step_boundary_intro: &'static str,
+    step_boundary_scope: &'static str,
+    step_boundary_scope_detail: &'static str,
+    step_boundary_next_step: &'static str,
+    step_boundary_next_step_detail: &'static str,
+    step_boundary_last_step: &'static str,
 }
 
 /// Selects workflow prompt copy from the display language frozen on the run.
@@ -416,6 +459,12 @@ fn prompt_copy(locale: WorkflowRunLocale) -> PromptCopy {
             previous_failure_kind: "失败类型：",
             previous_failure_message: "失败信息：",
             previous_failure_output: "上一次的最终输出（供对照，可能已截断）：",
+            step_boundary_intro: "你在继续一个已暂停的工作流步骤。以下是本步骤的范围；用户本轮消息只改变本步骤的内容。",
+            step_boundary_scope: "本步骤范围",
+            step_boundary_scope_detail: "只完成当前步骤的产出，不要代替后续节点执行它们的任务，也不要合并多个步骤的成果。",
+            step_boundary_next_step: "如果用户要求进入下一步",
+            step_boundary_next_step_detail: "说明当前步骤需要用户在工作流界面确认完成后才会推进，不要自行开始后续节点。",
+            step_boundary_last_step: "（无，本步骤是最后一步）",
         },
         WorkflowRunLocale::EnUs => PromptCopy {
             current_step_intro: "You are responsible for the workflow step identified below. Focus on this step and make your final response a clear handoff for downstream steps.",
@@ -440,6 +489,12 @@ fn prompt_copy(locale: WorkflowRunLocale) -> PromptCopy {
             previous_failure_kind: "Failure type: ",
             previous_failure_message: "Failure message: ",
             previous_failure_output: "Previous final output (for reference, may be truncated):",
+            step_boundary_intro: "You are continuing a paused workflow step. Below is this step's scope; the user's message changes only this step.",
+            step_boundary_scope: "Step scope",
+            step_boundary_scope_detail: "Finish only this step's deliverable. Do not perform later nodes' tasks or merge several steps' results.",
+            step_boundary_next_step: "If the user asks to move on",
+            step_boundary_next_step_detail: "Explain that the user must confirm this step complete in the workflow interface before the run advances. Do not start later nodes yourself.",
+            step_boundary_last_step: "(none — this is the last step)",
         },
     }
 }
@@ -830,6 +885,40 @@ mod tests {
         assert!(texts[3].contains(r#""approved": true"#));
         assert!(texts[3].contains("\"approved\": {"));
         assert!(texts[3].ends_with("</structured_output_contract>"));
+    }
+
+    /// The human-turn boundary names the step and its successors without promising enforcement.
+    #[test]
+    fn step_boundary_names_successors_and_claims_no_runtime_block() {
+        let graph = WorkflowGraph::parse(GRAPH).unwrap();
+        let review = graph.node("review").unwrap();
+        let text = render_step_boundary(&graph, review, WorkflowRunLocale::EnUs);
+        assert!(text.starts_with("<workflow_step_boundary>"));
+        assert!(text.ends_with("</workflow_step_boundary>"));
+        assert!(text.contains("Step: \"Review\" (`review`)"));
+        assert!(text.contains("Direct successors: \"Deliver\" (`output`)"));
+        assert!(
+            !text.contains("block") && !text.contains("prevent"),
+            "the block must not claim a runtime restriction it cannot enforce: {text}"
+        );
+
+        let output = graph.node("output").unwrap();
+        let last = render_step_boundary(&graph, output, WorkflowRunLocale::EnUs);
+        assert!(last.contains("(none — this is the last step)"));
+        assert!(!last.contains("Direct successors: \""));
+    }
+
+    /// A Chinese run gets the Chinese boundary copy.
+    #[test]
+    fn step_boundary_uses_the_run_language() {
+        let graph = WorkflowGraph::parse(GRAPH).unwrap();
+        let text = render_step_boundary(
+            &graph,
+            graph.node("review").unwrap(),
+            WorkflowRunLocale::ZhCn,
+        );
+        assert!(text.contains("直接后续节点"));
+        assert!(text.contains("不要代替后续节点执行它们的任务"));
     }
 
     /// A re-run after an agent-behaviour failure injects the previous attempt between context and

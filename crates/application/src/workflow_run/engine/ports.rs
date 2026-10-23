@@ -438,7 +438,10 @@ pub trait WorkflowRunEngineRepository: WorkflowRetryRepository {
     ///
     /// `structured_output` carries the parsed, schema-validated object of an agent node's
     /// structured-output contract, written to `{node}.structured_output` alongside the status
-    /// transition in the same transaction.
+    /// transition in the same transaction. `payload_patch` is merged into the node payload in that
+    /// same transaction, which is how a forced interactive completion records its audit without a
+    /// second write that could be lost between the commit and the audit.
+    #[allow(clippy::too_many_arguments)]
     fn complete_node(
         &self,
         node_run_id: &WorkflowNodeRunId,
@@ -446,6 +449,7 @@ pub trait WorkflowRunEngineRepository: WorkflowRetryRepository {
         structured_output: Option<serde_json::Value>,
         stop_reason: Option<String>,
         file_changes: Vec<FileChange>,
+        payload_patch: Option<&serde_json::Value>,
         now: i64,
     ) -> Result<AdvanceWorkflowRunResult, RepositoryError>;
 

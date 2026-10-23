@@ -532,6 +532,9 @@ pub enum NodeCompletionRequester {
 pub struct CompleteWorkflowNodeRequest {
     pub run_id: String,
     pub node_id: String,
+    /// Explicitly completes despite blockers; the node payload records the forced audit.
+    #[serde(default)]
+    pub force: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub requester: Option<NodeCompletionRequester>,
@@ -985,17 +988,19 @@ mod tests {
             &CompleteWorkflowNodeRequest {
                 run_id: "run-1".to_string(),
                 node_id: "node-1".to_string(),
+                force: false,
                 requester: None,
             },
-            json!({ "runId": "run-1", "nodeId": "node-1" }),
+            json!({ "runId": "run-1", "nodeId": "node-1", "force": false }),
         );
         assert_serialized_json(
             &CompleteWorkflowNodeRequest {
                 run_id: "run-1".to_string(),
                 node_id: "node-1".to_string(),
+                force: false,
                 requester: Some(NodeCompletionRequester::Human),
             },
-            json!({ "runId": "run-1", "nodeId": "node-1", "requester": "human" }),
+            json!({ "runId": "run-1", "nodeId": "node-1", "force": false, "requester": "human" }),
         );
         assert_serialized_json(
             &CompleteWorkflowNodeResponse { run },

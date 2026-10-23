@@ -173,6 +173,7 @@ impl WorkflowRunInvalidationPublisher for WorkflowRunInvalidations {
 pub(crate) fn build_workflow_run_engine(
     agent_runtime: Arc<AgentRuntimeManager>,
     pool: RepositoryPool,
+    sessions_root: PathBuf,
     baselines_root: PathBuf,
     clock: SystemClock,
     app_events: AppEventPublisher,
@@ -187,6 +188,7 @@ pub(crate) fn build_workflow_run_engine(
     let transitions = Arc::new(WorkflowRunTransitions::new(
         pool.clone(),
         invalidations.clone(),
+        run_locks.clone(),
     ));
     let executor = WorkflowRunNodeExecutor::new(
         agent_runtime,
@@ -194,6 +196,7 @@ pub(crate) fn build_workflow_run_engine(
         SqliteAgentDefinitionRepository::new(pool.clone()),
         callback.clone(),
         clock,
+        sessions_root,
         baselines_root,
         transitions.clone(),
     );
@@ -461,6 +464,7 @@ mod tests {
                 None,
                 None,
                 vec![],
+                /*payload_patch*/ None,
                 45,
             )
             .unwrap();

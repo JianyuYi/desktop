@@ -3,6 +3,7 @@
 use super::session::{HumanTurnAdmission, begin_human_turn, end_human_turn};
 use crate::workflow::run::test_fixture::{
     AGENT_GRAPH, bind_and_park, bootstrap, locks, recording_transitions, run_test, started_run,
+    write_settled_turn,
 };
 use ora_application::{WorkflowRepository, WorkflowRunEngineRepository};
 use ora_db::{SqliteWorkflowRepository, SqliteWorkflowRunEngineRepository};
@@ -28,6 +29,8 @@ fn every_human_turn_uses_the_frozen_policy_after_a_draft_edit() {
             .find(|node| node.node_id == "agent")
             .unwrap();
         let (session_id, node_run_id) = bind_and_park(&pool, agent);
+        let sessions_root = temp.path().join("sessions");
+        write_settled_turn(&sessions_root, session_id.as_ref(), "go", "done");
         graph["nodes"][1]["data"]["agentConfig"]["promptInactivity"] = json!("timeout");
         SqliteWorkflowRepository::new(pool.clone())
             .update_draft(&WorkflowId::new("workflow-1"), graph.to_string(), 60)
@@ -37,22 +40,32 @@ fn every_human_turn_uses_the_frozen_policy_after_a_draft_edit() {
         let (transitions, recording) = recording_transitions(&pool);
 
         for _ in 0..2 {
-            assert_eq!(
-                begin_human_turn(
-                    &pool,
-                    &run_locks,
-                    &completing,
-                    &transitions,
-                    session_id.as_ref()
-                )
-                .await
-                .unwrap(),
-                HumanTurnAdmission::Workflow {
-                    node_run_id: node_run_id.clone(),
-                    prompt_inactivity: PromptInactivityPolicy::Wait,
-                },
+            let admission = begin_human_turn(
+                &pool,
+                &run_locks,
+                &completing,
+                &transitions,
+                session_id.as_ref(),
+            )
+            .await
+            .unwrap();
+            let HumanTurnAdmission::Workflow {
+                node_run_id: admitted,
+                prompt_inactivity,
+                step_boundary,
+            } = &admission
+            else {
+                panic!("a bound interactive session must be admitted as a workflow turn");
+            };
+            assert_eq!(admitted, &node_run_id);
+            assert_eq!(*prompt_inactivity, PromptInactivityPolicy::Wait);
+            assert!(
+                step_boundary.starts_with("<workflow_step_boundary>"),
+                "every human turn carries the step boundary"
             );
-            end_human_turn(&transitions, &node_run_id).await.unwrap();
+            end_human_turn(&pool, &sessions_root, &transitions, &node_run_id)
+                .await
+                .unwrap();
         }
         assert_eq!(
             repository

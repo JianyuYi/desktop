@@ -3,6 +3,7 @@
 mod tests {
     mod iteration;
     mod lifecycle;
+    mod workflow_interactive;
     mod workflow_mcp;
     mod workflow_resume;
     mod workflow_retry;

@@ -5,7 +5,13 @@ import { describe, expect, it, vi } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { ChatTurn, SessionConversation } from "@ora/chat";
 import { createChatStore } from "@ora/chat";
-import type { GraphWorkflowNodeStatus } from "@ora/workflow-runtime";
+import { RemoteContractError } from "@ora/contracts";
+import { toast } from "@ora/ui";
+import type {
+  GraphWorkflowNodeStatus,
+  WorkflowNodeCompletion,
+  WorkflowNodeCompletionBlockerKind,
+} from "@ora/workflow-runtime";
 import { appI18n } from "../../i18n/i18n-instance";
 import {
   createTestQueryClient,
@@ -97,6 +103,34 @@ function seededConversation(
   };
 }
 
+/** A parked turn that settled normally, so the step card is ready to advance. */
+function readyCompletion(): WorkflowNodeCompletion {
+  return {
+    userSeq: 1,
+    turnKey: { userSeq: 1, endedSeq: 2 },
+    stopReason: "end_turn",
+    blockers: [],
+    warnings: [],
+    outputDigest: "sha256:ready",
+    provisional: false,
+    ready: true,
+  };
+}
+
+/** A parked turn with one blocker; `provisional` marks cleanup that has not settled yet. */
+function blockedCompletion(
+  kind: WorkflowNodeCompletionBlockerKind,
+  provisional = false,
+): WorkflowNodeCompletion {
+  return {
+    userSeq: 1,
+    blockers: [{ kind, params: {} }],
+    warnings: [],
+    provisional,
+    ready: false,
+  };
+}
+
 function renderDock(
   status: GraphWorkflowNodeStatus,
   isResponding: boolean,
@@ -104,6 +138,8 @@ function renderDock(
   sessionActions?: ReactNode,
   onNodeCompleted?: (nodeId: string) => void,
   configOptions: acp.SessionConfigOption[] = [],
+  completion?: WorkflowNodeCompletion,
+  nextNodeTitles?: string[],
 ) {
   const clientHandlers: TestHandlers =
     createFixtureHandlers(createFixtureState());
@@ -118,7 +154,12 @@ function renderDock(
     <RunNodeSessionChat
       sessionId={sessionId}
       status={status}
-      interaction={{ runId, nodeId }}
+      interaction={{
+        runId,
+        nodeId,
+        ...(completion !== undefined ? { completion } : {}),
+        ...(nextNodeTitles !== undefined ? { nextNodeTitles } : {}),
+      }}
       sessionActions={sessionActions}
       onNodeCompleted={onNodeCompleted}
     />,
@@ -210,13 +251,11 @@ describe("RunNodeSessionChat", () => {
       appI18n.t("chat.diagnosticsLastActivity"),
     );
     const group = document.querySelector('[data-subagent-group="child"]');
-    await userEvent
-      .setup()
-      .click(
-        screen.getByRole("button", {
-          name: `${appI18n.t("chat.bindingLocateChildren")} · Worker`,
-        }),
-      );
+    await userEvent.setup().click(
+      screen.getByRole("button", {
+        name: `${appI18n.t("chat.bindingLocateChildren")} · Worker`,
+      }),
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(
       document.querySelectorAll('[data-subagent-group="child"]'),
@@ -525,7 +564,15 @@ describe("RunNodeSessionChat", () => {
   });
 
   it("completes the node when the button is clicked while awaiting input", async () => {
-    const { client } = renderDock("awaiting_input", false);
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+    );
     const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
 
     const button = screen.getByTestId("complete-current-node");
@@ -533,7 +580,11 @@ describe("RunNodeSessionChat", () => {
     await userEvent.click(button);
 
     await waitFor(() =>
-      expect(completeSpy).toHaveBeenCalledWith({ runId, nodeId }),
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
     );
   });
 
@@ -549,6 +600,8 @@ describe("RunNodeSessionChat", () => {
       [],
       undefined,
       onNodeCompleted,
+      undefined,
+      readyCompletion(),
     );
     vi.spyOn(handlers, "completeWorkflowNode").mockImplementation(async () => {
       await completionGate;
@@ -586,8 +639,274 @@ describe("RunNodeSessionChat", () => {
     expect(onNodeCompleted).toHaveBeenCalledWith(nodeId);
   });
 
+  it("shows a ready step card that completes without force and names the next step", async () => {
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+      ["Review changes"],
+    );
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
+
+    const card = screen.getByTestId("node-step-card");
+    expect(within(card).getByText("等待参与")).toBeInTheDocument();
+    const action = screen.getByTestId("complete-ready-node");
+    expect(action).toHaveTextContent("完成并进入下一步：Review changes");
+    expect(screen.getByTestId("continue-chat")).toHaveTextContent("继续对话");
+
+    await userEvent.click(action);
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
+    );
+  });
+
+  it("omits the next step on the last node", () => {
+    renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+    );
+
+    const action = screen.getByTestId("complete-ready-node");
+    expect(action).toHaveTextContent("完成当前步骤");
+    expect(action).not.toHaveTextContent("下一步");
+  });
+
+  it("keeps the ordinary completion entry for a node parked without a snapshot", async () => {
+    const { client } = renderDock("awaiting_input", false, []);
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
+
+    const card = screen.getByTestId("node-step-card");
+    expect(card).toHaveTextContent("本步骤还没有完成快照");
+    expect(within(card).getByText("已暂停")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTestId("complete-legacy-node"));
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
+    );
+    expect(screen.getByTestId("force-complete-node")).toBeInTheDocument();
+  });
+
+  it("reports a rejected completion instead of failing silently", async () => {
+    const errorToast = vi.spyOn(toast, "error").mockImplementation(() => "id");
+    const { handlers } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+    );
+    handlers.completeWorkflowNode = async () => {
+      throw new RemoteContractError(
+        {
+          code: "workflow_node_turn_changed",
+          params: {
+            nodeId,
+            expected: { userSeq: 1, endedSeq: 2 },
+            actual: { userSeq: 3, endedSeq: 4 },
+          },
+          requestId: "550e8400-e29b-41d4-a716-446655440000",
+        },
+        null,
+      );
+    };
+
+    await userEvent.click(screen.getByTestId("complete-ready-node"));
+
+    await waitFor(() =>
+      expect(errorToast).toHaveBeenCalledWith(
+        "本轮对话已变化，请刷新运行后重新确认。",
+        { description: undefined, action: undefined },
+      ),
+    );
+    errorToast.mockRestore();
+  });
+
+  it.each([
+    ["turn_stopped", "已停止：本轮生成被中断。"],
+    ["turn_truncated", "被截断：本轮达到输出上限。"],
+    ["turn_refused", "拒答：智能体没有完成本轮请求。"],
+    ["turn_unknown", "回合未知：没有找到本轮正常结束的记录。"],
+    ["structured_invalid", "结构化输出不符合：本轮输出未通过声明的结构校验。"],
+    ["output_missing", "没有输出：本轮没有产生声明的输出。"],
+  ] as const)(
+    "renders the %s blocker as a paused step card",
+    (kind, reason) => {
+      renderDock(
+        "awaiting_input",
+        false,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        blockedCompletion(kind),
+      );
+
+      const card = screen.getByTestId("node-step-card");
+      expect(within(card).getByText("已暂停")).toBeInTheDocument();
+      expect(card).toHaveTextContent("本轮未完成");
+      expect(card).toHaveTextContent(reason);
+      expect(screen.getByTestId("continue-current-step")).toBeInTheDocument();
+      expect(screen.getByTestId("force-complete-node")).toBeInTheDocument();
+    },
+  );
+
+  it("offers the ordinary completion for a provisional turn and re-checks it", async () => {
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      blockedCompletion("turn_unknown", true),
+    );
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
+
+    const card = screen.getByTestId("node-step-card");
+    expect(card).toHaveTextContent("等待参与");
+    expect(card).toHaveTextContent(
+      "本轮仍在收尾；点完成时会按本轮重新校验，未结束会给出原因。",
+    );
+    expect(within(card).getByTestId("force-complete-node")).toBeInTheDocument();
+    expect(screen.getByTestId("complete-current-node")).toBeEnabled();
+
+    await userEvent.click(screen.getByTestId("complete-ready-node"));
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: false,
+      }),
+    );
+  });
+
+  it("shows non-blocking warnings from a ready turn", () => {
+    renderDock("awaiting_input", false, [], undefined, undefined, undefined, {
+      ...readyCompletion(),
+      warnings: ["empty_output"],
+    });
+
+    const card = screen.getByTestId("node-step-card");
+    expect(card).toHaveTextContent(
+      "本轮没有文本输出；该节点未声明输出契约，仍可完成。",
+    );
+    expect(card).toHaveTextContent("等待参与");
+  });
+
+  it("sends a scoped human turn when continuing an incomplete step", async () => {
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      blockedCompletion("turn_stopped"),
+    );
+    const promptSpy = vi.spyOn(client.session, "prompt");
+
+    await userEvent.click(screen.getByTestId("continue-current-step"));
+
+    await waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1));
+    const request = promptSpy.mock.calls[0]![0];
+    expect(request.sessionId).toBe(sessionId);
+    const text = request.prompt
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n");
+    expect(text).toContain("请继续当前步骤");
+    expect(text).toContain("已停止");
+    expect(text).toContain("不要执行后续节点");
+  });
+
+  it("sends a human turn when continuing a ready step", async () => {
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      readyCompletion(),
+    );
+    const promptSpy = vi.spyOn(client.session, "prompt");
+
+    await userEvent.click(screen.getByTestId("continue-chat"));
+
+    await waitFor(() => expect(promptSpy).toHaveBeenCalledTimes(1));
+    const request = promptSpy.mock.calls[0]![0];
+    const text = request.prompt
+      .flatMap((block) => (block.type === "text" ? [block.text] : []))
+      .join("\n");
+    expect(text).toContain("请继续对话");
+    expect(text).toContain("暂时不要结束当前步骤");
+  });
+
+  it("requires confirmation before force-completing an incomplete step", async () => {
+    const { client } = renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      blockedCompletion("turn_refused"),
+    );
+    const completeSpy = vi.spyOn(client.workflowRun, "completeNode");
+
+    await userEvent.click(screen.getByTestId("force-complete-node"));
+    expect(completeSpy).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("仍然完成当前步骤？");
+    await userEvent.click(within(dialog).getByTestId("confirm-force-complete"));
+
+    await waitFor(() =>
+      expect(completeSpy).toHaveBeenCalledWith({
+        runId,
+        nodeId,
+        force: true,
+      }),
+    );
+  });
+
   it("disables the complete button while the agent is responding", () => {
     renderDock("awaiting_input", true);
+    expect(screen.getByTestId("complete-current-node")).toBeDisabled();
+  });
+
+  it("disables the bottom-right completion action while blockers remain", () => {
+    renderDock(
+      "awaiting_input",
+      false,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      blockedCompletion("turn_truncated"),
+    );
+
     expect(screen.getByTestId("complete-current-node")).toBeDisabled();
   });
 

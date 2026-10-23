@@ -21,6 +21,8 @@ import {
   type GraphWorkflowRun,
   type WorkflowDefinition,
   type WorkflowNodeConversationItem,
+  type WorkflowNodeCompletion,
+  type WorkflowNodeCompletionBlocker,
   type WorkflowNodeErrorDetail,
   type WorkflowNodeAiDiagnosis,
   type WorkflowNodeFileChange,
@@ -303,12 +305,18 @@ export function useCompleteWorkflowNode() {
   const client = useContractsClient();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { runId: string; nodeId: string }) =>
+    mutationFn: (input: { runId: string; nodeId: string; force?: boolean }) =>
       client.workflowRun.completeNode({
         runId: input.runId,
         nodeId: input.nodeId,
+        force: input.force ?? false,
       }),
     onSuccess: (_result, variables) => {
+      invalidateRunViews(queryClient, variables.runId);
+    },
+    // Turn/digest conflicts mean the preview is stale: refresh the run the same way a
+    // successful mutation does so the next attempt reads the committed turn state.
+    onError: (_error, variables) => {
       invalidateRunViews(queryClient, variables.runId);
     },
   });
@@ -705,6 +713,7 @@ function projectPersistedNodeState(
 ): GraphWorkflowNodeState {
   const payload =
     nodeRun.payload != null ? parseNodePayload(nodeRun.payload) : null;
+  const completion = parseCompletion(payload?.completion);
   const errorDetail = parseErrorDetail(payload?.error_detail);
   const aiDiagnosis = parseAiDiagnosis(payload?.ai_diagnosis);
   const parsedRetryWait = parseRetryWait(payload?.retry_wait);
@@ -762,6 +771,7 @@ function projectPersistedNodeState(
     ...(payload?.stop_reason != null
       ? { stopReason: payload.stop_reason }
       : {}),
+    ...(completion !== undefined ? { completion } : {}),
     ...(payload?.file_changes != null && payload.file_changes.length > 0
       ? { fileChanges: payload.file_changes }
       : {}),
@@ -834,6 +844,7 @@ function parseNodePayload(payload: string): {
   ai_diagnosis?: unknown;
   retry_wait?: unknown;
   auto_retry?: unknown;
+  completion?: unknown;
 } | null {
   try {
     const value = JSON.parse(payload) as {
@@ -849,6 +860,7 @@ function parseNodePayload(payload: string): {
       ai_diagnosis?: unknown;
       retry_wait?: unknown;
       auto_retry?: unknown;
+      completion?: unknown;
     };
     return {
       ...(typeof value.stop_reason === "string"
@@ -889,9 +901,109 @@ function parseNodePayload(payload: string): {
       ...(value.auto_retry !== undefined
         ? { auto_retry: value.auto_retry }
         : {}),
+      ...(value.completion !== undefined
+        ? { completion: value.completion }
+        : {}),
     };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Maps a persisted `payload.completion` snapshot onto the read projection.
+ *
+ * A malformed or absent snapshot returns `undefined`, which callers must treat as the
+ * conservative `turn_unknown` state rather than inferring readiness from old node runs.
+ */
+function parseCompletion(value: unknown): WorkflowNodeCompletion | undefined {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const snapshot = value as {
+    userSeq?: unknown;
+    turnKey?: unknown;
+    stopReason?: unknown;
+    blockers?: unknown;
+    warnings?: unknown;
+    outputDigest?: unknown;
+    provisional?: unknown;
+  };
+  if (!Array.isArray(snapshot.blockers)) {
+    return undefined;
+  }
+  const blockers = snapshot.blockers.flatMap((raw) => {
+    if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+      return [];
+    }
+    const entry = raw as { kind?: unknown; params?: unknown };
+    if (typeof entry.kind !== "string") {
+      return [];
+    }
+    return [
+      {
+        kind: normalizeCompletionBlockerKind(entry.kind),
+        params:
+          entry.params != null &&
+          typeof entry.params === "object" &&
+          !Array.isArray(entry.params)
+            ? (entry.params as Record<string, unknown>)
+            : {},
+      },
+    ];
+  });
+  const provisional =
+    typeof snapshot.provisional === "boolean" ? snapshot.provisional : false;
+  const turnKey = parseTurnKey(snapshot.turnKey);
+  return {
+    ...(typeof snapshot.userSeq === "number"
+      ? { userSeq: snapshot.userSeq }
+      : {}),
+    ...(turnKey !== undefined ? { turnKey } : {}),
+    ...(typeof snapshot.stopReason === "string"
+      ? { stopReason: snapshot.stopReason }
+      : {}),
+    blockers,
+    warnings: Array.isArray(snapshot.warnings)
+      ? snapshot.warnings.filter(
+          (warning): warning is string => typeof warning === "string",
+        )
+      : [],
+    ...(typeof snapshot.outputDigest === "string"
+      ? { outputDigest: snapshot.outputDigest }
+      : {}),
+    provisional,
+    ready: blockers.length === 0 && !provisional,
+  };
+}
+
+/** Parses the turn identity without letting one bad field invalidate the whole snapshot. */
+function parseTurnKey(
+  value: unknown,
+): { userSeq: number; endedSeq: number } | undefined {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const key = value as { userSeq?: unknown; endedSeq?: unknown };
+  return typeof key.userSeq === "number" && typeof key.endedSeq === "number"
+    ? { userSeq: key.userSeq, endedSeq: key.endedSeq }
+    : undefined;
+}
+
+/** Keeps an unrecognized future blocker kind blocking instead of accidentally reading as ready. */
+function normalizeCompletionBlockerKind(
+  kind: string,
+): WorkflowNodeCompletionBlocker["kind"] {
+  switch (kind) {
+    case "turn_stopped":
+    case "turn_truncated":
+    case "turn_refused":
+    case "turn_unknown":
+    case "structured_invalid":
+    case "output_missing":
+      return kind;
+    default:
+      return "turn_unknown";
   }
 }
 

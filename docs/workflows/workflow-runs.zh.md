@@ -62,6 +62,14 @@
 
 交互的 Agent 节点在第一个回合之后停下等待输入。后续消息作为人工回合在同一会话上运行，`completeWorkflowNode` 手动完成节点；一个完成认领防止后续回合与手动完成竞争。Iteration 区域的成员默认不是交互的，运行时拒绝交互成员。
 
+每个停靠回合都会写入完成快照：turn key、stop reason、blockers 和最终 assistant 文本的 digest。只有 `EndTurn` 且没有 blocker 的回合才能正常完成；停止、截断、拒答或未知终态会保持等待输入，`completeWorkflowNode` 返回 `workflow_node_incomplete`（带上全部 blocker），除非显式传 `force`；turn key 或 digest 变化分别返回 `workflow_node_turn_changed` / `workflow_node_output_changed`，并给出 expected 与 actual。会话末尾的步骤卡片是唯一的推进入口，提供继续或二次确认后的强制完成。
+
+如果流在 stop reason 持久化前被 drop，节点按最后一次可读历史写 provisional 快照：保留它描述的 `userSeq`，并带 `turn_not_settled` warning；之后完成时，只要同一 user 消息的回合已经收敛就修复该快照。升级前停靠、完全没有快照的节点由第一次完成尝试在读取会话历史后物化快照，再走同一套 blocker 门禁，所以未完成的回合同样会被拒绝，不会静默推进。
+
+每个人工回合都带一个从冻结图渲染的 `<workflow_step_boundary>` 块：它写明当前步骤与直接后续节点，并声明只完成本步骤；它不承诺运行时会阻止后续节点，而记录给用户的 prompt 仍是用户原文。
+
+`force` 完成会在节点 payload 的 `completion_forced` 下留痕，记录被绕过的 blockers、本轮是否有终态，以及采用的输出从哪来（`turn_window` 或 `last_assistant_message`）。这条审计与完成在同一个事务里写入，所以已完成的节点不会缺这条记录。
+
 ## 变量与类型
 
 运行的变量池保存在 `workflow_runs.payload` 中。它的目录声明类型化的 Start 输入和产生数据的节点的稳定输出；启用结构化输出时还声明 `agent-1.structured_output`。`variablePool.values` 只保存已赋值的值。节点完成时的写入与节点状态转换在同一个事务里提交。启动指令留在 `workflow_runs.input` 中，不是可选择的变量。

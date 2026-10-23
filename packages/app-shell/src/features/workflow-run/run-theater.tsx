@@ -28,6 +28,7 @@ import {
   type RunPathRegionStage,
 } from "./run-path-structure";
 import { resolveTheaterFocus } from "./run-focus";
+import { directSuccessorNodeTitles } from "./run-node-completion";
 import { isNodeWorking } from "./run-status-style";
 import {
   animateOverlayWidth,
@@ -146,6 +147,11 @@ export function RunTheater({
   const nodeById = useMemo(
     () => new Map(run.definitionSnapshot.nodes.map((node) => [node.id, node])),
     [run.definitionSnapshot.nodes],
+  );
+  // The parked step card names the direct next step; empty means this is the last step.
+  const nextNodeTitlesByNodeId = useMemo(
+    () => directSuccessorNodeTitles(run),
+    [run],
   );
   const pathStructure = useMemo(
     () => projectRunPathStructure(run.definitionSnapshot),
@@ -378,6 +384,7 @@ export function RunTheater({
           data: node.data,
           state,
           artifactCount: artifactCountByNode[nodeId] ?? 0,
+          nextNodeTitles: nextNodeTitlesByNodeId[nodeId] ?? [],
           conversation:
             state.conversation != null && state.conversation.length > 0
               ? state.conversation
@@ -392,6 +399,7 @@ export function RunTheater({
     visibleNodeStates,
     artifactCountByNode,
     conversationByNodeId,
+    nextNodeTitlesByNodeId,
   ]);
 
   useEffect(() => {
@@ -751,6 +759,9 @@ export function RunTheater({
                     }}
                     onNodeCompleted={
                       primaryLoopId === null ? onNodeCompleted : undefined
+                    }
+                    nextNodeTitles={
+                      nextNodeTitlesByNodeId[primaryNode.id] ?? []
                     }
                     variant="stage"
                     showCompletedOutput={primaryLoopId !== null}

@@ -56,6 +56,11 @@ interface ChatViewProps {
   contextBar?: ReactNode;
   /** Actions overlaid at the lower-right of the composer slot so the composer stays centered. */
   composerActions?: ReactNode;
+  /**
+   * Optional content pinned after the transcript and above the composer. Features that need a
+   * current-step surface own its contents, so ordinary chat stays unaware of workspace entities.
+   */
+  trailing?: ReactNode;
   /** Optional placement and visibility threshold for the shared conversation navigator. */
   conversationNavigation?: ConversationNavigationPresentation;
   /**
@@ -111,6 +116,7 @@ export function ChatView({
   onRespondToPermission,
   contextBar,
   composerActions,
+  trailing,
   conversationNavigation,
   disabledHint,
   sendDisabledHint,
@@ -203,6 +209,12 @@ export function ChatView({
           availableCommands={availableCommands}
           conversationNavigation={conversationNavigation}
         />
+      )}
+
+      {trailing && (
+        <div data-slot="chat-trailing" className="shrink-0 px-3 pb-1 sm:px-5">
+          <div className="mx-auto w-full max-w-[760px]">{trailing}</div>
+        </div>
       )}
 
       <div

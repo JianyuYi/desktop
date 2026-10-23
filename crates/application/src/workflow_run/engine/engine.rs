@@ -250,6 +250,33 @@ where
         stop_reason: Option<String>,
         file_changes: Vec<FileChange>,
     ) -> Result<(), EngineError> {
+        self.complete_node_with_payload_patch(
+            run_id,
+            node_run_id,
+            output,
+            structured_output,
+            stop_reason,
+            file_changes,
+            None,
+        )
+    }
+
+    /// Completes one node-run while merging extra payload keys in the same transaction.
+    ///
+    /// A caller that must persist provenance for the completion itself — the forced interactive
+    /// completion's audit — passes it as `payload_patch`, so the audit cannot be lost between the
+    /// commit and a second write.
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_node_with_payload_patch(
+        &self,
+        run_id: &WorkflowRunId,
+        node_run_id: &WorkflowNodeRunId,
+        output: Option<String>,
+        structured_output: Option<serde_json::Value>,
+        stop_reason: Option<String>,
+        file_changes: Vec<FileChange>,
+        payload_patch: Option<serde_json::Value>,
+    ) -> Result<(), EngineError> {
         let now = self.clock.now_timestamp_millis();
         match self.repository.complete_node(
             node_run_id,
@@ -257,6 +284,7 @@ where
             structured_output,
             stop_reason,
             file_changes,
+            payload_patch.as_ref(),
             now,
         )? {
             AdvanceWorkflowRunResult::Advanced => {
@@ -383,6 +411,7 @@ where
                             None,
                             None,
                             Vec::new(),
+                            None,
                             now,
                         )?;
                         if matches!(advanced, AdvanceWorkflowRunResult::Advanced) {

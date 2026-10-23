@@ -337,6 +337,111 @@ describe("buildDisplayRun", () => {
     expect(display.status).toBe("awaiting_input");
   });
 
+  it("projects a parked turn's completion preview and derives readiness", () => {
+    const display = buildDisplayRun(
+      {
+        ...detail,
+        nodes: [
+          {
+            nodeId: "explore",
+            status: "pending",
+            startedAt: 2n,
+            finishedAt: 3n,
+            error: null,
+            output: null,
+            payload: JSON.stringify({
+              completion: {
+                userSeq: 7,
+                turnKey: { userSeq: 7, endedSeq: 8 },
+                stopReason: "end_turn",
+                blockers: [],
+                warnings: ["empty_output"],
+                outputDigest: "sha256:abc",
+                provisional: false,
+              },
+            }),
+          },
+        ],
+      },
+      GRAPH,
+    );
+
+    expect(display.nodeStates.explore).toMatchObject({
+      status: "awaiting_input",
+      completion: {
+        userSeq: 7,
+        turnKey: { userSeq: 7, endedSeq: 8 },
+        stopReason: "end_turn",
+        blockers: [],
+        warnings: ["empty_output"],
+        outputDigest: "sha256:abc",
+        provisional: false,
+        ready: true,
+      },
+    });
+  });
+
+  it("keeps blockers blocking and normalizes an unknown future blocker", () => {
+    const display = buildDisplayRun(
+      {
+        ...detail,
+        nodes: [
+          {
+            nodeId: "explore",
+            status: "pending",
+            startedAt: 2n,
+            finishedAt: null,
+            error: null,
+            output: null,
+            payload: JSON.stringify({
+              completion: {
+                userSeq: 7,
+                blockers: [
+                  { kind: "structured_invalid", params: { message: "bad" } },
+                  { kind: "a_future_blocker", params: null },
+                ],
+                warnings: [],
+                provisional: true,
+              },
+            }),
+          },
+        ],
+      },
+      GRAPH,
+    );
+
+    expect(display.nodeStates.explore.completion).toMatchObject({
+      blockers: [
+        { kind: "structured_invalid", params: { message: "bad" } },
+        { kind: "turn_unknown", params: {} },
+      ],
+      provisional: true,
+      ready: false,
+    });
+  });
+
+  it("leaves completion absent on older node runs without a snapshot", () => {
+    const display = buildDisplayRun(
+      {
+        ...detail,
+        nodes: [
+          {
+            nodeId: "explore",
+            status: "pending",
+            startedAt: 2n,
+            finishedAt: null,
+            error: null,
+            output: null,
+            payload: null,
+          },
+        ],
+      },
+      GRAPH,
+    );
+
+    expect(display.nodeStates.explore).not.toHaveProperty("completion");
+  });
+
   it("preserves the committed workflow output separately from node outputs", () => {
     const display = buildDisplayRun(
       {

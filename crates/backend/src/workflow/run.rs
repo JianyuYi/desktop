@@ -4,6 +4,7 @@
 mod aggregator_persistence_tests;
 mod api;
 mod checkpoint;
+mod completion_snapshot;
 mod diagnosis;
 mod engine;
 mod executor;

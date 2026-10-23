@@ -349,10 +349,13 @@ fn confirmed_and_dropped_workflow_follow_ups_restore_awaiting_status() -> TestRe
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            // The last human turn was cancelled, so its snapshot parks as `turn_stopped`: only an
+            // explicit force completes a turn that did not end normally.
             let completed = runs
                 .complete_node(CompleteWorkflowNodeRequest {
                     run_id: run.id,
                     node_id: "agent".to_string(),
+                    force: true,
                     requester: Some(NodeCompletionRequester::Human),
                 })
                 .await?;
