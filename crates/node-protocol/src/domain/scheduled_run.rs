@@ -11,8 +11,8 @@
 //! artifact bounds are the ones the approved Cloud ADR froze and shared with local scheduled runs;
 //! the crate keeps its own copies because it must stay free of Ora application-domain crates.
 
-use crate::domain::revision::StoredObject;
-use crate::{ExecutionId, MessageValidationError};
+use crate::domain::revision::{ObjectUploadGrant, StoredObject};
+use crate::{ExecutionId, MessageValidationError, NodeRuntimeIdentity, Sha256Digest};
 use ora_utils::path::StrictRelativePath;
 use serde::{Deserialize, Serialize};
 
@@ -288,6 +288,51 @@ impl DeliverScheduledArtifactsSpec {
     }
 }
 
+/// One declared artifact the Node still has to store, addressed the way Cloud grants it.
+///
+/// A scheduled artifact has no object key before Cloud issues the grant: Cloud owns every key, and
+/// the declaration index is what identifies the artifact to Cloud. The request therefore names the
+/// declaration entry together with the size and digest Cloud binds into the PUT signature; the Node
+/// uploads only to the key the grant names.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactUpload {
+    pub index: u32,
+    pub size_bytes: u64,
+    pub sha256: Sha256Digest,
+}
+
+impl ScheduledArtifactUpload {
+    /// Requires a declaration index, size and canonical digest Cloud could have persisted.
+    pub(crate) fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.index as usize >= MAX_SCHEDULED_ARTIFACTS_PER_RUN
+            || self.size_bytes > MAX_SCHEDULED_ARTIFACT_BYTES
+        {
+            return Err(MessageValidationError::InvalidScheduledArtifactManifest);
+        }
+        self.sha256.validate()
+    }
+}
+
+/// The upload grant Cloud issued for one declared artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactUploadGrant {
+    /// The declaration entry Cloud signed the grant for.
+    pub index: u32,
+    pub grant: ObjectUploadGrant,
+}
+
+impl ScheduledArtifactUploadGrant {
+    /// Requires a declaration index the manifest bound and a usable grant.
+    pub(crate) fn validate(&self) -> Result<(), MessageValidationError> {
+        if self.index as usize >= MAX_SCHEDULED_ARTIFACTS_PER_RUN {
+            return Err(MessageValidationError::InvalidScheduledArtifactManifest);
+        }
+        self.grant.validate()
+    }
+}
+
 /// The artifacts the Node uploaded, as it measured them; Cloud verifies each before registering it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -340,5 +385,28 @@ impl ScheduledArtifactsExecutionResult {
             }
             Self::Failed(_) => Ok(()),
         }
+    }
+}
+
+/// Stored terminal evidence of one artifact upload, reported only by status queries.
+///
+/// The sequenced `ScheduledArtifactsResultMessage` remains the only settlement path, exactly as for
+/// a Revision delivery: a query cannot acknowledge anything, so this value exists only to answer
+/// what happened to an execution after a reconnect or restart. It repeats the origin because a
+/// restarted Node reports retained evidence without becoming its author.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactsEvidence {
+    pub node: NodeRuntimeIdentity,
+    pub result: ScheduledArtifactsExecutionResult,
+}
+
+impl ScheduledArtifactsEvidence {
+    /// Keeps the origin identifiable and the retained terminal facts bounded.
+    pub(crate) fn validate(&self) -> Result<(), MessageValidationError> {
+        self.node
+            .validate()
+            .map_err(|field| MessageValidationError::EmptyField { field })?;
+        self.result.validate()
     }
 }

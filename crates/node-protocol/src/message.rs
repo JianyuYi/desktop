@@ -32,11 +32,13 @@ pub use revision::{
     UploadGrantMessage, UploadGrantNeeded, UploadGrantNeededMessage,
 };
 pub use runtime_control::{
-    ControlledClone, ControlledDeliverRevision, ControlledPlugins, ControlledStartAgentSession,
-    RuntimeBinding, RuntimeControlState,
+    ControlledClone, ControlledDeliverRevision, ControlledDeliverScheduledArtifacts,
+    ControlledPlugins, ControlledStartAgentSession, RuntimeBinding, RuntimeControlState,
 };
 pub use scheduled_artifacts::{
-    DeliverScheduledArtifacts, DeliverScheduledArtifactsMessage, ScheduledArtifactsResultMessage,
+    DeliverScheduledArtifacts, DeliverScheduledArtifactsMessage, ScheduledArtifactGrantNeeded,
+    ScheduledArtifactGrantNeededMessage, ScheduledArtifactGrants, ScheduledArtifactGrantsMessage,
+    ScheduledArtifactsResultMessage,
 };
 use serde::{Deserialize, Serialize};
 pub use session::{
@@ -65,6 +67,7 @@ pub enum ControllerToNodeMessage {
     ControlledPlugins(ControlledPlugins),
     ControlledStartAgentSession(Box<ControlledStartAgentSession>),
     ControlledDeliverRevision(Box<ControlledDeliverRevision>),
+    ControlledDeliverScheduledArtifacts(ControlledDeliverScheduledArtifacts),
     EnsureWorktree(EnsureWorktreeMessage),
     RemoveWorktree(RemoveWorktreeMessage),
     GetExecutionStatus(GetExecutionStatusMessage),
@@ -76,6 +79,8 @@ pub enum ControllerToNodeMessage {
     EndSession(EndSessionMessage),
     DeliverRevision(DeliverRevisionMessage),
     DeliverScheduledArtifacts(DeliverScheduledArtifactsMessage),
+    /// Memory-only: never persisted, logged, or acknowledged.
+    ScheduledArtifactGrants(ScheduledArtifactGrantsMessage),
     /// Memory-only: never persisted, logged, or acknowledged.
     UploadGrant(UploadGrantMessage),
 }
@@ -92,6 +97,7 @@ impl ValidateMessage for ControllerToNodeMessage {
             Self::ControlledPlugins(message) => message.validate(),
             Self::ControlledStartAgentSession(message) => message.validate(),
             Self::ControlledDeliverRevision(message) => message.validate(),
+            Self::ControlledDeliverScheduledArtifacts(message) => message.validate(),
             Self::EnsureWorktree(message) => message.validate(),
             Self::RemoveWorktree(message) => message.validate(),
             Self::GetExecutionStatus(message) => message.validate(),
@@ -103,6 +109,7 @@ impl ValidateMessage for ControllerToNodeMessage {
             Self::EndSession(message) => message.validate(),
             Self::DeliverRevision(message) => message.validate(),
             Self::DeliverScheduledArtifacts(message) => message.validate(),
+            Self::ScheduledArtifactGrants(message) => message.validate(),
             Self::UploadGrant(message) => message.validate(),
         }
     }
@@ -130,6 +137,7 @@ pub enum NodeToControllerMessage {
     SessionCommandRejected(SessionCommandRejectedMessage),
     RevisionResult(RevisionResultMessage),
     ScheduledArtifactsResult(ScheduledArtifactsResultMessage),
+    ScheduledArtifactGrantNeeded(ScheduledArtifactGrantNeededMessage),
     UploadGrantNeeded(UploadGrantNeededMessage),
 }
 
@@ -154,6 +162,7 @@ impl ValidateMessage for NodeToControllerMessage {
             Self::SessionCommandRejected(message) => message.validate(),
             Self::RevisionResult(message) => message.validate(),
             Self::ScheduledArtifactsResult(message) => message.validate(),
+            Self::ScheduledArtifactGrantNeeded(message) => message.validate(),
             Self::UploadGrantNeeded(message) => message.validate(),
         }
     }
