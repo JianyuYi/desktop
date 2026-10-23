@@ -134,12 +134,15 @@ export function RunTheaterActCard({
       ? { sessionId: state.sessionId }
       : null;
   const interactive = data.agentConfig?.interactive === true;
-  // A parked interactive turn without a ready completion preview is paused: the previous turn
-  // did not settle normally, or an older node run has no snapshot yet.
+  // A parked interactive turn without a settled completion preview is paused: the previous turn
+  // did not settle normally, or an older node run has no snapshot yet. A provisional snapshot is
+  // not paused: the step card invites the ordinary completion and the backend re-checks it, so the
+  // act card must not label the same state differently.
   const paused =
     interactive &&
     state.status === "awaiting_input" &&
-    state.completion?.ready !== true;
+    state.completion?.ready !== true &&
+    state.completion?.provisional !== true;
   const sessionInteraction =
     sessionChatIdentity !== null &&
     interactive &&

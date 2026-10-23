@@ -474,6 +474,39 @@ describe("RunTheaterActCard conversation", () => {
     expect(screen.queryByText("cancelled")).toBeNull();
   });
 
+  it("keeps a provisional turn out of the paused badge", () => {
+    render(
+      <RunTheaterActCard
+        data={{
+          ...NODE_DATA,
+          agentConfig: {
+            schemaVersion: 3,
+            executor: { agentCli: AGENT_REF.opencode, modelId: "mock-model" },
+            roleId: "reviewer",
+            skills: [],
+            mcps: [],
+            prompt: "Review the current branch.",
+            interactive: true,
+          },
+        }}
+        state={{
+          status: "awaiting_input",
+          completion: {
+            blockers: [{ kind: "turn_unknown", params: {} }],
+            warnings: ["turn_not_settled"],
+            provisional: true,
+            ready: false,
+          },
+        }}
+        live
+      />,
+      { wrapper: createSessionWrapper() },
+    );
+
+    expect(screen.getByText("等待参与")).toBeInTheDocument();
+    expect(screen.queryByText("已暂停")).toBeNull();
+  });
+
   it("keeps the session dock available while HITL interaction owns the footer", async () => {
     const user = userEvent.setup();
     render(

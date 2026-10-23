@@ -788,7 +788,7 @@ describe("RunNodeSessionChat", () => {
     expect(card).toHaveTextContent(
       "本轮仍在收尾；点完成时会按本轮重新校验，未结束会给出原因。",
     );
-    expect(within(card).queryByTestId("force-complete-node")).toBeNull();
+    expect(within(card).getByTestId("force-complete-node")).toBeInTheDocument();
     expect(screen.getByTestId("complete-current-node")).toBeEnabled();
 
     await userEvent.click(screen.getByTestId("complete-ready-node"));

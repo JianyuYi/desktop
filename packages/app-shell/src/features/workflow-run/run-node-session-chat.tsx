@@ -417,6 +417,16 @@ export function RunNodeSessionChat({
               >
                 {t("workflowRun.stepCard.continueStep")}
               </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                data-testid="force-complete-node"
+                disabled={actionDisabled}
+                onClick={() => setForceOpen(true)}
+              >
+                {t("workflowRun.stepCard.forceAction")}
+              </Button>
             </>
           ) : hasCompletionSnapshot ? (
             <>
