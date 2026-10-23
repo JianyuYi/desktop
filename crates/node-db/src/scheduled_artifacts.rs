@@ -130,7 +130,11 @@ impl<G: WriteGuard> NodeDatabase<G> {
                 Err(Error::IdentityConflict)
             };
         }
-        if permit.is_some() && !self.unfinished_runtime_executions()?.is_empty() {
+        if permit.is_some()
+            && !self
+                .unfinished_conflicting_executions(DeliveryFamily::ScheduledArtifacts)?
+                .is_empty()
+        {
             return Err(Error::ResourceConflict);
         }
         self.guard.before_write(WritePoint::Accept)?;

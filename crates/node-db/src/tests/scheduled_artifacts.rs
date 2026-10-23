@@ -281,3 +281,116 @@ fn controlled_admission_checks_the_runtime_permit() {
         Err(Error::InvalidTransition)
     ));
 }
+
+/// A Revision delivery and the upload of the same run are the one pair Cloud dispatches together
+/// (`0065_scheduled_artifact_execution_kind.sql`), so neither may refuse the other. A second
+/// execution of either family, and every other liability, still closes the slot.
+#[test]
+fn a_revision_delivery_and_the_upload_of_one_run_run_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = NodeDatabase::open(
+        &dir.path().join("db"),
+        NodeIdentity::Require(NodeId::new("node")),
+    )
+    .unwrap();
+    db.enforce_runtime_control().unwrap();
+    // Both attempts belong to one Cloud run, and each has its own Node-local operation.
+    let mut run = super::repository::runtime_scope(db.node_id());
+    run.operation_id = "run-1".to_owned();
+    db.bind_runtime(&run).unwrap();
+    let permit = |command_operation: &OperationId, execution: &ExecutionId| {
+        let mut binding = run.clone();
+        binding.node_operation_id = command_operation.as_str().to_owned();
+        binding.execution_id = execution.as_str().to_owned();
+        binding
+    };
+    let delivery = super::revision::deliver();
+    let delivery_envelope = ControlledDeliverRevision {
+        binding: permit(&delivery.operation_id, &delivery.execution_id),
+        command: delivery.clone(),
+    };
+    db.accept_controlled_delivery(&delivery_envelope).unwrap();
+    // Cloud registers both deliveries when the session ends and dispatches them in either order,
+    // so the upload must be admitted while the Revision delivery still runs.
+    let upload_envelope = ControlledDeliverScheduledArtifacts {
+        binding: permit(&upload().operation_id, &upload().execution_id),
+        command: upload(),
+    };
+    assert_eq!(
+        db.accept_controlled_scheduled_artifacts(&upload_envelope)
+            .unwrap(),
+        ScheduledArtifactsDelivery {
+            command: upload(),
+            progress: ScheduledArtifactsProgress::Running,
+        }
+    );
+    // Only the peer family is excused: a second execution of either family still conflicts.
+    assert_eq!(
+        db.unfinished_conflicting_executions(DeliveryFamily::Revision)
+            .unwrap(),
+        vec![delivery.execution_id.as_str().to_owned()]
+    );
+    assert_eq!(
+        db.unfinished_conflicting_executions(DeliveryFamily::ScheduledArtifacts)
+            .unwrap(),
+        vec![upload().execution_id.as_str().to_owned()]
+    );
+    // A retried attempt arrives as a new Cloud execution and a new Node-local operation.
+    let second_upload = ControlledDeliverScheduledArtifacts {
+        binding: permit(
+            &OperationId::new("upload-op-2"),
+            &ExecutionId::new("upload-execution-2"),
+        ),
+        command: DeliverScheduledArtifactsMessage {
+            operation_id: OperationId::new("upload-op-2"),
+            execution_id: ExecutionId::new("upload-execution-2"),
+            ..upload()
+        },
+    };
+    assert!(matches!(
+        db.accept_controlled_scheduled_artifacts(&second_upload),
+        Err(Error::ResourceConflict)
+    ));
+    let second_delivery = ControlledDeliverRevision {
+        binding: permit(
+            &OperationId::new("deliver-op-2"),
+            &ExecutionId::new("deliver-execution-2"),
+        ),
+        command: DeliverRevisionMessage {
+            operation_id: OperationId::new("deliver-op-2"),
+            execution_id: ExecutionId::new("deliver-execution-2"),
+            ..delivery.clone()
+        },
+    };
+    assert!(matches!(
+        db.accept_controlled_delivery(&second_delivery),
+        Err(Error::ResourceConflict)
+    ));
+    // Both stay local liabilities for everything that is not the peer delivery.
+    assert_eq!(
+        db.unfinished_runtime_executions().unwrap(),
+        vec![
+            delivery.execution_id.as_str().to_owned(),
+            upload().execution_id.as_str().to_owned(),
+        ]
+    );
+    db.complete_delivery(
+        &delivery.execution_id,
+        super::revision::plan().outcome.result(),
+    )
+    .unwrap();
+    db.complete_scheduled_artifacts(
+        &upload().execution_id,
+        &identity(),
+        ScheduledArtifactsExecutionResult::Failed(ScheduledArtifactsFailed {
+            reason: ScheduledArtifactsFailureReason::UploadFailed,
+        }),
+    )
+    .unwrap();
+    assert!(db.unfinished_runtime_executions().unwrap().is_empty());
+    assert!(
+        db.unfinished_conflicting_executions(DeliveryFamily::Revision)
+            .unwrap()
+            .is_empty()
+    );
+}

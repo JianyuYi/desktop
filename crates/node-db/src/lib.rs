@@ -22,6 +22,7 @@ pub use repository_model::{
     CloneExecution, ClonePhase, CloneProgress, CloneTarget, ClonedCheckout,
 };
 pub use revision::{DeliveryPlan, DeliveryProgress, FrozenOutcome, RevisionDelivery};
+pub use runtime_control::DeliveryFamily;
 pub use scheduled_artifacts::{
     ScheduledArtifactDeclaration, ScheduledArtifactsDelivery, ScheduledArtifactsProgress,
 };
