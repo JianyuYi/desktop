@@ -38,7 +38,7 @@ pub use runtime_control::{
 pub use scheduled_artifacts::{
     DeliverScheduledArtifacts, DeliverScheduledArtifactsMessage, ScheduledArtifactGrantNeeded,
     ScheduledArtifactGrantNeededMessage, ScheduledArtifactGrants, ScheduledArtifactGrantsMessage,
-    ScheduledArtifactsResultMessage,
+    ScheduledArtifactGrantsRefusedMessage, ScheduledArtifactsResultMessage,
 };
 use serde::{Deserialize, Serialize};
 pub use session::{
@@ -82,6 +82,8 @@ pub enum ControllerToNodeMessage {
     /// Memory-only: never persisted, logged, or acknowledged.
     ScheduledArtifactGrants(ScheduledArtifactGrantsMessage),
     /// Memory-only: never persisted, logged, or acknowledged.
+    ScheduledArtifactGrantsRefused(ScheduledArtifactGrantsRefusedMessage),
+    /// Memory-only: never persisted, logged, or acknowledged.
     UploadGrant(UploadGrantMessage),
 }
 
@@ -110,6 +112,7 @@ impl ValidateMessage for ControllerToNodeMessage {
             Self::DeliverRevision(message) => message.validate(),
             Self::DeliverScheduledArtifacts(message) => message.validate(),
             Self::ScheduledArtifactGrants(message) => message.validate(),
+            Self::ScheduledArtifactGrantsRefused(message) => message.validate(),
             Self::UploadGrant(message) => message.validate(),
         }
     }

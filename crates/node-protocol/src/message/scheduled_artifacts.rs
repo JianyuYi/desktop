@@ -41,6 +41,20 @@ pub struct ScheduledArtifactGrants {
     pub grants: Vec<ScheduledArtifactUploadGrant>,
 }
 
+/// Answers an upload request with "no grant will ever be issued for this execution".
+///
+/// Cloud stops granting once the run left `delivering`, its frozen deadline has no usable window
+/// left, or no object store is configured for it. None of those states can turn back into a grant
+/// for the same execution, so the Node must stop asking and settle the artifacts it could not
+/// store instead of holding its delivery slot open until the process restarts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledArtifactGrantsRefusedMessage {
+    pub protocol_version: ProtocolVersion,
+    pub operation_id: OperationId,
+    pub execution_id: ExecutionId,
+}
+
 /// Correlates the upload with its IssueRun and durable execution identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeliverScheduledArtifactsMessage {
@@ -136,5 +150,13 @@ impl ValidateMessage for ScheduledArtifactGrantsMessage {
             grant.validate()?;
         }
         Ok(())
+    }
+}
+
+impl ValidateMessage for ScheduledArtifactGrantsRefusedMessage {
+    /// Names only the upload it withdraws: a refusal grants nothing and carries no other fact.
+    fn validate(&self) -> Result<(), MessageValidationError> {
+        validate_protocol_version(self.protocol_version)?;
+        validate_execution_ids(&self.operation_id, &self.execution_id)
     }
 }

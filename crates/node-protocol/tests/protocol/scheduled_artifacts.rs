@@ -321,3 +321,48 @@ async fn completed_upload_status_carries_its_evidence() -> Result<(), TestError>
     case.assert_round_trip().await?;
     Ok(())
 }
+
+/// Cloud withdraws the grants of one upload with an identity-only message: a refusal grants nothing
+/// and must not be mistaken for a grant reply with an empty set.
+#[tokio::test]
+async fn a_refused_upload_grant_round_trips() -> Result<(), TestError> {
+    let case = Case {
+        message: Message::Controller(ControllerToNodeMessage::ScheduledArtifactGrantsRefused(
+            ScheduledArtifactGrantsRefusedMessage {
+                protocol_version: CURRENT_PROTOCOL_VERSION,
+                operation_id: OperationId::new("run-1"),
+                execution_id: ExecutionId::new("exec-upload"),
+            },
+        )),
+        wire: json!({"message_type": "scheduled_artifact_grants_refused", "protocol_version": 1,
+            "operation_id": "run-1", "execution_id": "exec-upload"}),
+    };
+    case.assert_wire().await?;
+    case.assert_round_trip().await?;
+    // The refusal names an upload and nothing else, so the shared envelope checks are applied here
+    // instead of through the fixture helper, which mutates a payload field this message has none of.
+    reject_structure(Peer::Node, &case.wire, "opposite direction").await;
+    let mut wire = case.wire.clone();
+    replace(&mut wire, "/protocol_version", json!(2));
+    reject_semantics(
+        Peer::Controller,
+        &wire,
+        "protocol_version",
+        MessageValidationError::UnsupportedProtocolVersion {
+            actual: 2,
+            expected: 1,
+        },
+    )
+    .await?;
+    let mut wire = case.wire.clone();
+    replace(&mut wire, "/execution_id", json!(""));
+    reject_semantics(
+        Peer::Controller,
+        &wire,
+        "execution_id",
+        MessageValidationError::EmptyField {
+            field: "execution_id",
+        },
+    )
+    .await
+}
