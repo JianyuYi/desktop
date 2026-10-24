@@ -78,6 +78,9 @@ A confirmed launch is durable positive evidence: later unknown observations reta
 A later `NotStarted` launch or direct-process report is rejected without replacing the saved observation,
 including after host recovery. This prevents cancellation of a missing guardian Run from erasing a
 known launch and becoming false stop confirmation.
+The coordinator rejects only that snapshot, exposes `Rejected(ConflictingRun)` in the Scope's
+coordination status, and continues persisting other Run and Scope observations. It retains retry
+responsibility without stopping the host; journal and filesystem failures still propagate as errors.
 
 Older exact journal layouts (versions 1 to 5) migrate transactionally. A version-2 journal with existing
 Scope directories is refused before migration, because those guardians still speak the old token

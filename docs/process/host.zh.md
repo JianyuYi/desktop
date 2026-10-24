@@ -63,6 +63,8 @@ ora-process-host recover /absolute/private/process-state /absolute/private/bin/o
 
 已确认启动是持久的正面证据：后续未知观测仍保留 `LaunchFact::Started`。之后的启动事实或直接进程状态若报告 `NotStarted`，
 宿主会拒绝矛盾应答并保留原观测，宿主恢复后也一样。这防止对 guardian 缺失 Run 的取消抹去已知启动事实，进而制造停止确认。
+协调器只拒绝这一条快照，在该 Scope 的 coordination 中公开 `Rejected(ConflictingRun)`，并继续持久化其他 Run 和 Scope 的观测。
+该 Scope 保留重试责任，host 继续服务；journal 和文件系统故障仍作为错误向上传播。
 
 旧的精确日志布局（版本 1 到 5）在事务中迁移。已有 Scope 目录的版本 2 日志会在迁移前被拒绝，因为那些 guardian 仍在使用旧的
 token 协议：保留一个兼容的旧宿主，或使用新的状态目录，永远不要为了强制升级而删除 Scope。不保证已删除的 token 值会从 SQLite

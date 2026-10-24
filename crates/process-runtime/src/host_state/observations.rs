@@ -95,9 +95,7 @@ impl HostState {
             && (matches!(snapshot.launch, LaunchFact::NotStarted(_))
                 || snapshot.direct == DirectProcessState::NotStarted)
         {
-            return Err(ProcessStateError::Rejected(
-                "NotStarted contradicts a confirmed launch",
-            ));
+            return Err(ProcessStateError::ContradictoryRunObservation(snapshot.id));
         }
         let mut snapshot = snapshot.clone();
         // A temporary loss of launch visibility must not reopen the non-launch branch later.
@@ -266,18 +264,14 @@ mod non_launch_tests {
             };
             assert!(matches!(
                 state.observe_run(&contradiction),
-                Err(ProcessStateError::Rejected(
-                    "NotStarted contradicts a confirmed launch"
-                ))
+                Err(ProcessStateError::ContradictoryRunObservation(run)) if run == intent.run
             ));
             assert_eq!(state.observed_run(intent.run)?, Some(original.clone()));
             drop(state);
             let mut recovered = HostState::recover(&root)?;
             assert!(matches!(
                 recovered.observe_run(&contradiction),
-                Err(ProcessStateError::Rejected(
-                    "NotStarted contradicts a confirmed launch"
-                ))
+                Err(ProcessStateError::ContradictoryRunObservation(run)) if run == intent.run
             ));
             assert_eq!(recovered.observed_run(intent.run)?, Some(original));
             recovered.observe_run(&RunSnapshot {

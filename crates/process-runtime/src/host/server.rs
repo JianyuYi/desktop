@@ -163,7 +163,9 @@ fn reject(error: ProcessStateError) -> HostReply {
         ProcessStateError::Rejected("unknown host Run" | "unknown host Scope") => {
             HostRejection::UnknownIdentity
         }
-        ProcessStateError::Rejected(_) => HostRejection::IntentRejected,
+        ProcessStateError::Rejected(_) | ProcessStateError::ContradictoryRunObservation(_) => {
+            HostRejection::IntentRejected
+        }
         ProcessStateError::Identity(_) => HostRejection::IntentRejected,
         ProcessStateError::Io(_) | ProcessStateError::Sqlite(_) => {
             HostRejection::StorageUnavailable
