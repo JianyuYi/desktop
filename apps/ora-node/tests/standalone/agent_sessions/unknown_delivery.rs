@@ -366,11 +366,10 @@ fn unknown_identity_blocks_complete_delivery_before_and_after_bound_and_restart(
                     loop {
                         if let NodeToControllerMessage::ExecutionStatus(status) =
                             next(&fixture, &mut stream).await
+                            && status.execution_id == original.execution_id
                         {
-                            if status.execution_id == original.execution_id {
-                                assert_eq!(status.payload.state, ExecutionState::Running);
-                                break;
-                            }
+                            assert_eq!(status.payload.state, ExecutionState::Running);
+                            break;
                         }
                     }
                     for command in [&pending, &frozen] {
@@ -420,11 +419,10 @@ fn unknown_identity_blocks_complete_delivery_before_and_after_bound_and_restart(
                         loop {
                             if let NodeToControllerMessage::ExecutionStatus(status) =
                                 next(&fixture, &mut stream).await
+                                && status.execution_id == command.execution_id
                             {
-                                if status.execution_id == command.execution_id {
-                                    assert_eq!(status.payload.state, ExecutionState::Running);
-                                    break;
-                                }
+                                assert_eq!(status.payload.state, ExecutionState::Running);
+                                break;
                             }
                         }
                     }
