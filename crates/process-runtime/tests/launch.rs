@@ -69,3 +69,72 @@ fn unknown_launch_replays_original_facts_and_rejects_changed_parameters() {
         Err(StartError::ConflictingRun(id))
     );
 }
+
+struct NonLaunchingPlatform;
+
+impl Platform for NonLaunchingPlatform {
+    /// Both guarantees are available so the test verifies evidence rather than admission fallback.
+    fn capabilities(&self) -> PlatformCapabilities {
+        PlatformCapabilities::StrongAndBestEffort
+    }
+    /// Explicit platform non-execution is a positive fact, not an observation timeout.
+    fn spawn(
+        &mut self,
+        _run: RunId,
+        _spec: &RunSpec,
+        _guarantee: ContainmentGuarantee,
+    ) -> Result<(), SpawnError> {
+        Err(SpawnError::NotStarted(
+            "platform refused before spawn".into(),
+        ))
+    }
+    /// A proven non-launch needs no process observation to manufacture exit.
+    fn observe(&mut self, _run: RunId) -> Result<PlatformObservation, PlatformError> {
+        panic!("proven non-launch must not be observed as a process")
+    }
+    /// No process exists to signal after this platform-confirmed non-launch.
+    fn signal(&mut self, _run: RunId, _signal: StopSignal) -> Result<(), PlatformError> {
+        panic!("proven non-launch must not receive process signals")
+    }
+}
+
+/// Platform non-launch reports the actual selected guarantee; BestEffort never claims quiescence.
+#[test]
+fn platform_nonlaunch_preserves_cleanup_evidence_for_each_guarantee()
+-> Result<(), Box<dyn std::error::Error>> {
+    use ora_process_protocol::{
+        CleanupEvidence, CleanupState, DirectProcessState, RunSnapshot, ScopeState, StopRequest,
+    };
+    use std::time::{Duration, Instant};
+    for (request, evidence) in [
+        (
+            ContainmentRequest::BestEffort,
+            CleanupEvidence::BestEffortComplete,
+        ),
+        (
+            ContainmentRequest::RequireStrong,
+            CleanupEvidence::ConfirmedQuiescence,
+        ),
+    ] {
+        let mut scope = ScopeRuntime::new(request, NonLaunchingPlatform)?;
+        let run = RunId::new();
+        let snapshot = scope.start(run, RunSpec::new("git", ".", DescendantPolicy::WaitForAll))?;
+        assert_eq!(
+            snapshot,
+            RunSnapshot {
+                id: run,
+                launch: LaunchFact::NotStarted("platform refused before spawn".into()),
+                direct: DirectProcessState::NotStarted,
+                cleanup: CleanupState::Complete(evidence)
+            }
+        );
+        let now = Instant::now();
+        scope.close(StopRequest::Force, now)?;
+        assert_eq!(
+            scope.reconcile(now + Duration::from_millis(/*millis*/ 1)),
+            vec![]
+        );
+        assert_eq!(scope.state(), ScopeState::Closed(evidence));
+    }
+    Ok(())
+}

@@ -10,6 +10,10 @@ use ora_process_protocol::{
 use crate::host_state::launch::GuardianLaunch;
 use crate::{HostState, ProcessStateError};
 
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;
+
 pub(super) struct Observation {
     pub(super) scope: Option<ScopeState>,
     pub(super) runs: Vec<RunSnapshot>,

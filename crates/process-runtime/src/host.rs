@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod non_launch_tests;
 mod server;
 mod worker;
 pub use server::serve_process_host;
@@ -8,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use ora_process_client::GuardianRuns;
 use ora_process_protocol::{
-    GuardianHostSession, HostCoordination, HostRunIntent, HostRunView, HostScopeView, RunId,
-    ScopeId,
+    GuardianHostSession, GuardianRunRejection, HostCoordination, HostRunIntent, HostRunView,
+    HostScopeView, RunId, ScopeId,
 };
 use tokio::task::JoinSet;
 
@@ -159,8 +161,17 @@ impl HostCoordinator {
             let (scope, observation) = result
                 .map_err(|_| ProcessStateError::Rejected("host coordination worker failed"))?;
             self.active.remove(&scope);
+            let mut status = observation.status;
             for snapshot in observation.runs {
-                self.state.observe_run(&snapshot)?;
+                match self.state.observe_run(&snapshot) {
+                    Ok(()) => {}
+                    // The journal retains the original fact. Reject only this snapshot, expose
+                    // the conflict and keep persisting its peers; storage failures still stop tick.
+                    Err(ProcessStateError::ContradictoryRunObservation(_)) => {
+                        status = HostCoordination::Rejected(GuardianRunRejection::ConflictingRun);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if let Some(state) = observation.scope {
                 self.state.observe_scope(scope, state)?;
@@ -172,7 +183,7 @@ impl HostCoordinator {
                 control_pending: false,
                 settled: false,
             });
-            progress.failures = if observation.status == HostCoordination::Observing {
+            progress.failures = if status == HostCoordination::Observing {
                 0
             } else {
                 progress.failures.saturating_add(1).min(6)
@@ -186,7 +197,7 @@ impl HostCoordinator {
                     + Duration::from_millis((100_u64 << progress.failures).min(5000) + jitter)
             };
             progress.control_pending = false;
-            progress.status = observation.status;
+            progress.status = status;
         }
         let scopes = self.state.scope_intents()?;
         let mut ordered: Vec<_> = scopes.into_iter().map(|intent| intent.scope).collect();

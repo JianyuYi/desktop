@@ -1,5 +1,5 @@
 use ora_process_protocol::{
-    CleanupState, DirectProcessState, RunId, RunSnapshot, ScopeId, ScopeState,
+    CleanupState, DirectProcessState, LaunchFact, RunId, RunSnapshot, ScopeId, ScopeState,
     decode_guardian_payload, encode_guardian_frame,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -81,8 +81,29 @@ impl HostState {
 
     /// Commits a changed fact before host queries can expose it; unchanged polling does not rewrite it.
     pub(crate) fn observe_run(&mut self, snapshot: &RunSnapshot) -> Result<(), ProcessStateError> {
-        if self.observed_run(snapshot.id)?.as_ref() != Some(snapshot) {
-            let bytes = encode_guardian_frame(snapshot)?;
+        let previous = self.observed_run(snapshot.id)?;
+        let confirmed_launch = previous.as_ref().is_some_and(|previous| {
+            previous.launch == LaunchFact::Started
+                || matches!(
+                    previous.direct,
+                    DirectProcessState::Running | DirectProcessState::Exited(_)
+                )
+        });
+        // Once launch is confirmed, a later cancellation/UnknownRun cannot erase that fact,
+        // including after a host restart. The prior observation remains the authority on error.
+        if confirmed_launch
+            && (matches!(snapshot.launch, LaunchFact::NotStarted(_))
+                || snapshot.direct == DirectProcessState::NotStarted)
+        {
+            return Err(ProcessStateError::ContradictoryRunObservation(snapshot.id));
+        }
+        let mut snapshot = snapshot.clone();
+        // A temporary loss of launch visibility must not reopen the non-launch branch later.
+        if confirmed_launch {
+            snapshot.launch = LaunchFact::Started;
+        }
+        if previous.as_ref() != Some(&snapshot) {
+            let bytes = encode_guardian_frame(&snapshot)?;
             self.connection.execute("INSERT INTO run_observations VALUES (?1, ?2) ON CONFLICT(run) DO UPDATE SET snapshot=excluded.snapshot", rusqlite::params![snapshot.id.to_string(), &bytes[4..]])?;
         }
         self.layout.sync()?;
@@ -183,6 +204,91 @@ mod tests {
         assert_eq!(state.run_intent(intent.run)?, Some(intent.clone()));
         assert_eq!(state.observed_run(intent.run)?, Some(snapshot));
         assert_eq!(state.run_intents()?, vec![intent]);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod non_launch_tests {
+    use super::*;
+    use ora_process_protocol::{
+        CleanupEvidence, DescendantPolicy, ExitOutcome, GuardianHostDisconnect, HostRunIntent,
+        RunSpec,
+    };
+    use pretty_assertions::assert_eq;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Recovery must not let an authoritative cancellation overwrite an earlier confirmed launch.
+    #[test]
+    fn confirmed_launch_rejects_not_started_before_and_after_host_recovery()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = std::env::var_os("HOME").ok_or("fixture HOME missing")?;
+        let directory = tempfile::Builder::new()
+            .prefix("ns")
+            .permissions(std::fs::Permissions::from_mode(/*mode*/ 0o700))
+            .tempdir_in(home)?;
+        for (index, direct) in [
+            DirectProcessState::Running,
+            DirectProcessState::Exited(ExitOutcome::Code(0)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = directory.path().join(index.to_string());
+            let mut state = HostState::create(&root)?;
+            let scope = ScopeId::new();
+            state.record_scope_intent(scope)?;
+            let intent = HostRunIntent {
+                scope,
+                run: RunId::new(),
+                spec: RunSpec::new(
+                    "/usr/bin/true",
+                    directory.path(),
+                    DescendantPolicy::WaitForAll,
+                ),
+                host_disconnect: GuardianHostDisconnect::KeepRunning,
+            };
+            state.record_run_intent(intent.clone())?;
+            let original = RunSnapshot {
+                id: intent.run,
+                launch: LaunchFact::Started,
+                direct,
+                cleanup: CleanupState::Pending,
+            };
+            state.observe_run(&original)?;
+            let contradiction = RunSnapshot {
+                id: intent.run,
+                launch: LaunchFact::NotStarted("cancelled before guardian acceptance".into()),
+                direct: DirectProcessState::NotStarted,
+                cleanup: CleanupState::Complete(CleanupEvidence::BestEffortComplete),
+            };
+            assert!(matches!(
+                state.observe_run(&contradiction),
+                Err(ProcessStateError::ContradictoryRunObservation(run)) if run == intent.run
+            ));
+            assert_eq!(state.observed_run(intent.run)?, Some(original.clone()));
+            drop(state);
+            let mut recovered = HostState::recover(&root)?;
+            assert!(matches!(
+                recovered.observe_run(&contradiction),
+                Err(ProcessStateError::ContradictoryRunObservation(run)) if run == intent.run
+            ));
+            assert_eq!(recovered.observed_run(intent.run)?, Some(original));
+            recovered.observe_run(&RunSnapshot {
+                id: intent.run,
+                launch: LaunchFact::Unknown("temporarily unavailable".into()),
+                direct: DirectProcessState::Unknown,
+                cleanup: CleanupState::Pending,
+            })?;
+            assert_eq!(
+                recovered
+                    .observed_run(intent.run)?
+                    .ok_or("missing observation")?
+                    .launch,
+                LaunchFact::Started
+            );
+            assert!(recovered.observe_run(&contradiction).is_err());
+        }
         Ok(())
     }
 }
