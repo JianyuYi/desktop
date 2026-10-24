@@ -135,6 +135,8 @@ impl ExecutionService for Server {
                             }),
                             prior_revision: None,
                             workspace_directory: Vec::new(),
+                            // A manual IssueRun carries no scheduled trigger.
+                            trigger: 0,
                         },
                     )),
                 }),
@@ -222,6 +224,12 @@ impl AgentRunService for Server {
         &self,
         _: Request<proto::GrantRevisionUploadRequest>,
     ) -> Result<Response<proto::GrantRevisionUploadResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn grant_scheduled_artifact_upload(
+        &self,
+        _: Request<proto::GrantScheduledArtifactUploadRequest>,
+    ) -> Result<Response<proto::GrantScheduledArtifactUploadResponse>, Status> {
         Err(Status::unimplemented("unused"))
     }
 }

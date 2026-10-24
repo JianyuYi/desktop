@@ -25,6 +25,30 @@ fn live(permit: &RuntimeBinding) -> Result<(), Error> {
     Ok(())
 }
 
+/// The two delivery families Cloud admits for one run at the same time.
+///
+/// Cloud keeps a session exclusive with every run execution and each family exclusive with itself,
+/// but it dispatches a Revision delivery next to the scheduled-artifact upload of the same run. A
+/// Node that treated either family as "the one controlled execution" refused the later arrival and
+/// closed the connection, so the families are named instead of being guessed from a table name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeliveryFamily {
+    /// The run's Git delivery of a Revision.
+    Revision,
+    /// The upload of the artifacts one ended scheduled session declared.
+    ScheduledArtifacts,
+}
+
+impl DeliveryFamily {
+    /// The other family Cloud lets run beside this one; its unfinished rows do not conflict.
+    fn peer(self) -> &'static str {
+        match self {
+            Self::Revision => "deliver_scheduled_artifacts",
+            Self::ScheduledArtifacts => "deliver_revision",
+        }
+    }
+}
+
 impl<G: WriteGuard> NodeDatabase<G> {
     /// Cloud mode is durable. Reopening this home through a legacy embedding cannot bypass it.
     pub fn enforce_runtime_control(&mut self) -> Result<(), Error> {
@@ -110,8 +134,29 @@ impl<G: WriteGuard> NodeDatabase<G> {
 
     /// Reports every unresolved local liability, including historical unbound executions.
     pub fn unfinished_runtime_executions(&self) -> Result<Vec<String>, Error> {
-        self.connection.prepare("SELECT execution FROM clone_executions WHERE state<>'completed' UNION SELECT execution FROM executions WHERE state<>'completed' UNION SELECT execution FROM plugin_executions WHERE state<>'completed' UNION SELECT execution FROM node_executions WHERE state<>'completed' UNION SELECT execution FROM revision_deliveries WHERE state<>'completed' UNION SELECT execution FROM process_attempts WHERE cleaned=0 UNION SELECT execution FROM session_restores WHERE phase='legacy_unknown' ORDER BY execution")?
-            .query_map([], |r| r.get(0))?.collect::<Result<Vec<_>,_>>().map_err(Error::from)
+        self.unfinished_executions_beside(/*peer*/ None)
+    }
+
+    /// Reports the unfinished executions that refuse accepting a controlled `family` execution.
+    ///
+    /// Cloud dispatches a Revision delivery and a scheduled-artifact upload of one run at the same
+    /// time (`0065_scheduled_artifact_execution_kind.sql`: "allowing a Revision and an upload
+    /// together"), while a session still excludes both and a second execution of either family is
+    /// still refused. The pair is the only exception; every other liability closes the slot.
+    pub fn unfinished_conflicting_executions(
+        &self,
+        family: DeliveryFamily,
+    ) -> Result<Vec<String>, Error> {
+        self.unfinished_executions_beside(Some(family.peer()))
+    }
+
+    /// One query for both answers: `peer` is the family whose rows do not conflict.
+    ///
+    /// `?1 IS NOT` also holds for a null `peer`, so the unparameterized answer needs no second
+    /// query to drift from this one.
+    fn unfinished_executions_beside(&self, peer: Option<&str>) -> Result<Vec<String>, Error> {
+        self.connection.prepare("SELECT execution FROM clone_executions WHERE state<>'completed' UNION SELECT execution FROM executions WHERE state<>'completed' UNION SELECT execution FROM plugin_executions WHERE state<>'completed' UNION SELECT execution FROM node_executions WHERE state<>'completed' UNION SELECT execution FROM revision_deliveries WHERE state<>'completed' AND ?1 IS NOT 'deliver_revision' UNION SELECT execution FROM scheduled_artifact_deliveries WHERE state<>'completed' AND ?1 IS NOT 'deliver_scheduled_artifacts' UNION SELECT execution FROM process_attempts WHERE cleaned=0 UNION SELECT execution FROM session_restores WHERE phase='legacy_unknown' ORDER BY execution")?
+            .query_map([peer], |r| r.get(0))?.collect::<Result<Vec<_>,_>>().map_err(Error::from)
     }
 
     pub(crate) fn validate_runtime_permit(&self, permit: &RuntimeBinding) -> Result<(), Error> {

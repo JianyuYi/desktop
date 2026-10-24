@@ -6,6 +6,7 @@ mod delivery;
 mod executor;
 mod plugins;
 mod revisions;
+mod scheduled_artifacts;
 mod session;
 mod worker;
 use crate::{CloneConfig, NodeConfig, ProcessConfig, Shutdown};

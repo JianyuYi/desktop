@@ -95,7 +95,8 @@ Cloud 可以把会话输入作为定时 occurrence 受理（`spec.trigger = sche
   被拒绝的候选连同原因保留在清单里，不会消失。遍历的 512 条目预算在读取每个目录时就地消耗，塞满名称的目录不会被完整
   枚举、保留或排序；清单最多列出 64 条拒绝，其余拒绝计入 `omitted_rejections`，而在没有读完所有条目就停止时设置
   `walk_truncated`，所以没人检查过的候选不会被当成一份完整的拒绝清单。目录不存在就不上报任何产物，对象键最终由 Cloud
-  决定；Node 不写 Workspace，也不持有对象存储凭据。
+  决定；Node 不写 Workspace，也不持有对象存储凭据。已声明文件的上传是独立的
+  `deliver_scheduled_artifacts` 执行，见 [Revisions](revisions.zh.md#定时产物上传)。
 
 ## 实时预览
 

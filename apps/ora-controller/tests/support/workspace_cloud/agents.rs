@@ -82,6 +82,8 @@ impl WorkspaceCloud {
                 spec: Some(proto::execution_input::Spec::AgentSession(
                     proto::AgentSessionSpec {
                         agent_configuration: configuration,
+                        // These fixtures are manual IssueRuns, not scheduled occurrences.
+                        trigger: 0,
                         agent_plugin_id: "official/ora-space.echo".into(),
                         agent_plugin_version: "1.2.3".into(),
                         checkout_execution_id: state.clones[0].execution_id.clone(),
@@ -468,5 +470,13 @@ impl AgentRunService for WorkspaceCloud {
         request: Request<proto::GrantRevisionUploadRequest>,
     ) -> Result<Response<proto::GrantRevisionUploadResponse>, Status> {
         self.grant(request.into_inner())
+    }
+    async fn grant_scheduled_artifact_upload(
+        &self,
+        _: Request<proto::GrantScheduledArtifactUploadRequest>,
+    ) -> Result<Response<proto::GrantScheduledArtifactUploadResponse>, Status> {
+        Err(Status::unimplemented(
+            "no scheduled artifact upload in these fixtures",
+        ))
     }
 }

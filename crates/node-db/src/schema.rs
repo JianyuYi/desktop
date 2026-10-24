@@ -41,7 +41,7 @@ pub(super) fn initialize(
         "user_version",
         |row| row.get(/*idx*/ 0),
     )?;
-    if app != APPLICATION_ID || !matches!(version, 1..=11) {
+    if app != APPLICATION_ID || !matches!(version, 1..=12) {
         return Err(Error::InvalidSchema);
     }
     let check: String = connection.pragma_query_value(
@@ -84,6 +84,9 @@ pub(super) fn initialize(
     }
     if version >= 11 {
         expected.execute_batch(include_str!("restore.sql"))?;
+    }
+    if version >= 12 {
+        expected.execute_batch(include_str!("scheduled_artifacts.sql"))?;
     }
     if schema_objects(connection)? != schema_objects(&expected)? {
         return Err(Error::InvalidSchema);
@@ -213,6 +216,27 @@ pub(super) fn initialize(
             /*schema_name*/ None,
             "user_version",
             /*pragma_value*/ 11,
+        )?;
+        tx.commit()?;
+    }
+    if version < 12 {
+        // v12 adds scheduled-artifact uploads and widens the terminal-event outbox to every family.
+        // Both rebuild tables referenced by existing records, so enforcement is disabled outside the
+        // transaction and its result is validated before commit.
+        connection.pragma_update(/*schema_name*/ None, "foreign_keys", "OFF")?;
+        let tx = connection.transaction()?;
+        tx.execute_batch(include_str!("scheduled_artifacts.sql"))?;
+        let violations: i64 =
+            tx.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if violations != 0 {
+            return Err(Error::InvalidSchema);
+        }
+        tx.pragma_update(
+            /*schema_name*/ None,
+            "user_version",
+            /*pragma_value*/ 12,
         )?;
         tx.commit()?;
     }

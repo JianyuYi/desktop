@@ -8,7 +8,7 @@ const FINAL: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const DIGEST: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Supplies a valid delivery of the session fixture's execution.
-fn deliver() -> DeliverRevisionMessage {
+pub(super) fn deliver() -> DeliverRevisionMessage {
     DeliverRevisionMessage {
         protocol_version: CURRENT_PROTOCOL_VERSION,
         operation_id: OperationId::new("deliver-op"),
@@ -43,7 +43,7 @@ fn node() -> NodeRuntimeIdentity {
 }
 
 /// A delivered plan matching [`deliver`].
-fn plan() -> DeliveryPlan {
+pub(super) fn plan() -> DeliveryPlan {
     let spec = deliver().payload.spec;
     DeliveryPlan {
         directory: "frozen".into(),
@@ -366,5 +366,5 @@ fn migrates_v8_without_losing_sessions() {
         .unwrap()
         .pragma_query_value(/*schema_name*/ None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
 }

@@ -176,3 +176,32 @@ impl ValidateMessage for ControlledDeliverRevision {
         Ok(())
     }
 }
+
+/// Scheduled-artifact upload with the same exact runtime permit required by every other execution,
+/// so artifacts only leave a Workspace inside the runtime Cloud bound to this Node.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlledDeliverScheduledArtifacts {
+    pub binding: RuntimeBinding,
+    pub command: super::DeliverScheduledArtifactsMessage,
+}
+
+impl ValidateMessage for ControlledDeliverScheduledArtifacts {
+    /// Rejects authority for another execution or operation before durable admission.
+    ///
+    /// The input deliberately names only the ended session, never this Node: the declaration is the
+    /// session's own durable fact, so a resent execution cannot choose a different Node. The Node
+    /// therefore checks the permit against its own identity when it admits the execution, and this
+    /// envelope only pairs the permit with the execution it was issued for.
+    fn validate(&self) -> Result<(), MessageValidationError> {
+        self.binding.validate()?;
+        self.command.validate()?;
+        if self.binding.input_closed
+            || self.binding.execution_id != self.command.execution_id.as_str()
+            || self.binding.node_operation_id != self.command.operation_id.as_str()
+        {
+            return Err(MessageValidationError::InvalidRuntimeBinding);
+        }
+        Ok(())
+    }
+}

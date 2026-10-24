@@ -163,6 +163,31 @@ impl CloudStore {
         Ok(Some(message))
     }
 
+    /// An artifact upload reads the run's checkout, so it needs the same exact execution permit.
+    ///
+    /// The input names only the ended session, so Cloud's record is the only place that says which
+    /// Node was dispatched this upload; the permit itself still has to bind that record exactly.
+    pub(super) async fn controlled_scheduled_artifacts(
+        &self,
+        command: DeliverScheduledArtifactsMessage,
+    ) -> Result<Option<ControllerToNodeMessage>, Error> {
+        let Some(record) = self.record(&command.execution_id).await? else {
+            return Ok(None);
+        };
+        let node = NodeId::new(record.node_id);
+        let Some(permit) = self.execution_permit(&command.execution_id, &node).await? else {
+            return Ok(None);
+        };
+        let message = ControllerToNodeMessage::ControlledDeliverScheduledArtifacts(
+            ControlledDeliverScheduledArtifacts {
+                binding: permit,
+                command,
+            },
+        );
+        message.validate()?;
+        Ok(Some(message))
+    }
+
     /// Registration proves historical responsibility, not current permission to start work.
     async fn execution_permit(
         &self,

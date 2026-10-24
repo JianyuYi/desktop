@@ -1,6 +1,7 @@
 use crate::{
     AgentSessionResult, CloneExecutionResult, MessageValidationError, NodeRuntimeIdentity,
-    PluginExecutionResult, RevisionExecutionResult, WorktreeExecutionResult,
+    PluginExecutionResult, RevisionExecutionResult, ScheduledArtifactsEvidence,
+    WorktreeExecutionResult,
 };
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,8 @@ pub enum ExecutionResult {
     // Boxed because a delivered Revision carries two object descriptions and three commits,
     // which would otherwise inflate every ExecutionState a status query builds.
     Revision(Box<RevisionExecutionResult>),
+    // Boxed because a delivered upload can list one object per declared artifact.
+    ScheduledArtifacts(Box<ScheduledArtifactsEvidence>),
 }
 
 impl ExecutionResult {
@@ -32,6 +35,7 @@ impl ExecutionResult {
             Self::Plugin(result) => result.validate(),
             Self::AgentSession(result) => result.validate(),
             Self::Revision(result) => result.validate(),
+            Self::ScheduledArtifacts(result) => result.validate(),
         }
     }
 
@@ -43,6 +47,7 @@ impl ExecutionResult {
             Self::Plugin(result) => result.node(),
             Self::AgentSession(result) => result.node(),
             Self::Revision(result) => result.node(),
+            Self::ScheduledArtifacts(result) => &result.node,
         }
     }
 }

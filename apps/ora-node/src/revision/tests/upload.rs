@@ -203,12 +203,18 @@ fn offer(grants: &GrantStore, job: &UploadJob, offered: Vec<ObjectUploadGrant>) 
 
 /// Waits for the next grant request the upload sends.
 async fn requested(
-    requests: &mut tokio::sync::broadcast::Receiver<UploadGrantNeededMessage>,
+    requests: &mut tokio::sync::broadcast::Receiver<crate::revision::GrantRequest>,
 ) -> UploadGrantNeededMessage {
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), requests.recv())
+    let request = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), requests.recv())
         .await
         .unwrap()
-        .unwrap()
+        .unwrap();
+    match request {
+        crate::revision::GrantRequest::Revisions(message) => message,
+        crate::revision::GrantRequest::Artifacts(message) => {
+            panic!("a Revision delivery asked for artifact grants: {message:?}")
+        }
+    }
 }
 
 /// Without a valid grant the upload asks for one with the frozen history digest; an expired
@@ -236,7 +242,10 @@ async fn grant_requests_carry_frozen_checksums_and_headers_travel_verbatim() {
     };
     assert_eq!(requested(&mut requests).await, expected);
     // A Controller connecting now gets the same request at once.
-    assert_eq!(grants.pending(), vec![expected.clone()]);
+    assert_eq!(
+        grants.pending(),
+        vec![crate::revision::GrantRequest::Revisions(expected.clone())]
+    );
     offer(
         &grants,
         &job,

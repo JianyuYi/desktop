@@ -138,6 +138,44 @@ impl CoordinationStore for CloudStore {
         self.upload_grants(session, operation, execution, request)
             .await
     }
+    async fn pending_scheduled_artifacts(
+        &self,
+        node: &NodeId,
+    ) -> Result<Vec<DeliverScheduledArtifactsMessage>, Error> {
+        self.scheduled_artifacts_pending(node).await
+    }
+    async fn original_scheduled_artifacts_dispatch(
+        &self,
+        session: &NodeRuntimeIdentity,
+        operation: &OperationId,
+        execution: &ExecutionId,
+    ) -> Result<Option<DeliverScheduledArtifactsMessage>, Error> {
+        self.scheduled_artifacts_command(session, operation, execution)
+            .await
+    }
+    async fn dispatch_scheduled_artifacts(
+        &self,
+        command: DeliverScheduledArtifactsMessage,
+    ) -> Result<Option<ControllerToNodeMessage>, Error> {
+        self.controlled_scheduled_artifacts(command).await
+    }
+    async fn take_over_scheduled_artifacts(
+        &self,
+        session: &NodeRuntimeIdentity,
+        event: &ScheduledArtifactsResultMessage,
+    ) -> Result<(), Error> {
+        self.scheduled_artifacts_event(session, event).await
+    }
+    async fn grant_scheduled_artifacts(
+        &self,
+        session: &NodeRuntimeIdentity,
+        operation: &OperationId,
+        execution: &ExecutionId,
+        artifacts: Vec<ScheduledArtifactUpload>,
+    ) -> Result<ArtifactGrantOutcome, Error> {
+        self.scheduled_artifact_grants(session, operation, execution, artifacts)
+            .await
+    }
     async fn wait_agent_command_hint(&self) {
         self.inner.command_hint.notified().await;
     }

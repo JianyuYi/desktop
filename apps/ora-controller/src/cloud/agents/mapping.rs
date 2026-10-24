@@ -48,7 +48,14 @@ pub(in crate::cloud) fn start(
                 initial_turn: turn(spec.initial_turn.as_ref().ok_or(Error::Conflict)?)?,
                 prior_revision: spec.prior_revision.as_ref().map(prior).transpose()?,
                 workspace_directory: spec.workspace_directory.iter().map(listing).collect(),
-                trigger: None,
+                // Cloud decides how the run was admitted; an unknown value is a contract the
+                // Controller does not implement, so the session is refused rather than started as a
+                // manual run that would never report its business result.
+                trigger: match proto::AgentSessionTrigger::try_from(spec.trigger) {
+                    Ok(proto::AgentSessionTrigger::Unspecified) => None,
+                    Ok(proto::AgentSessionTrigger::Scheduled) => Some(SessionTrigger::Scheduled),
+                    Err(_) => return Err(Error::Conflict),
+                },
             },
         },
     };
@@ -214,8 +221,89 @@ pub(super) fn result(value: &AgentSessionResult) -> proto::ExecutionResult {
                     AgentSessionEndReason::Interrupted => proto::AgentSessionEndReason::Interrupted,
                 } as i32,
                 detail: ended.detail.clone(),
+                // The business facts Cloud stores travel exactly as the executor measured them;
+                // Cloud verifies them and never derives them from the Thread.
+                scheduled_result: ended.scheduled_result.as_ref().map(reported),
+                artifact_manifest: ended.artifact_manifest.as_ref().map(manifest),
             },
         )),
+    }
+}
+
+/// Maps the executor's verdict onto the contract's enumeration.
+fn reported(value: &ScheduledRunResult) -> proto::ScheduledRunResult {
+    proto::ScheduledRunResult {
+        verdict: match value.verdict {
+            ScheduledVerdict::Pass => proto::ScheduledVerdict::Pass,
+            ScheduledVerdict::Warn => proto::ScheduledVerdict::Warn,
+            ScheduledVerdict::Fail => proto::ScheduledVerdict::Fail,
+            ScheduledVerdict::Blocked => proto::ScheduledVerdict::Blocked,
+            ScheduledVerdict::Idle => proto::ScheduledVerdict::Idle,
+            ScheduledVerdict::RangeUnresolved => proto::ScheduledVerdict::RangeUnresolved,
+        } as i32,
+        verdict_detail: value.verdict_detail.clone(),
+    }
+}
+
+/// Maps the declared artifacts and the refused candidates onto the contract's messages.
+fn manifest(value: &ScheduledArtifactManifest) -> proto::ScheduledArtifactManifest {
+    proto::ScheduledArtifactManifest {
+        omitted_rejections: value.omitted_rejections,
+        walk_truncated: value.walk_truncated,
+        items: value
+            .items
+            .iter()
+            .map(|item| proto::ScheduledArtifactItem {
+                index: item.index,
+                display_name: item.display_name.clone(),
+                kind: match item.kind {
+                    ScheduledArtifactKind::Markdown => proto::ScheduledArtifactKind::Markdown,
+                    ScheduledArtifactKind::Json => proto::ScheduledArtifactKind::Json,
+                    ScheduledArtifactKind::Text => proto::ScheduledArtifactKind::Text,
+                    ScheduledArtifactKind::Log => proto::ScheduledArtifactKind::Log,
+                    ScheduledArtifactKind::Xml => proto::ScheduledArtifactKind::Xml,
+                    ScheduledArtifactKind::Html => proto::ScheduledArtifactKind::Html,
+                } as i32,
+                size_bytes: item.size_bytes,
+                sha256: item.sha256.clone(),
+            })
+            .collect(),
+        rejections: value
+            .rejections
+            .iter()
+            .map(|rejection| proto::ScheduledArtifactRejection {
+                display_name: rejection.display_name.clone(),
+                reason: match rejection.reason {
+                    ScheduledArtifactRejectionReason::UnsupportedType => {
+                        proto::ScheduledArtifactRejectionReason::UnsupportedType
+                    }
+                    ScheduledArtifactRejectionReason::PathUnsafe => {
+                        proto::ScheduledArtifactRejectionReason::PathUnsafe
+                    }
+                    ScheduledArtifactRejectionReason::Symlink => {
+                        proto::ScheduledArtifactRejectionReason::Symlink
+                    }
+                    ScheduledArtifactRejectionReason::HardLink => {
+                        proto::ScheduledArtifactRejectionReason::HardLink
+                    }
+                    ScheduledArtifactRejectionReason::TooLarge => {
+                        proto::ScheduledArtifactRejectionReason::TooLarge
+                    }
+                    ScheduledArtifactRejectionReason::TooMany => {
+                        proto::ScheduledArtifactRejectionReason::TooMany
+                    }
+                    ScheduledArtifactRejectionReason::TotalTooLarge => {
+                        proto::ScheduledArtifactRejectionReason::TotalTooLarge
+                    }
+                    ScheduledArtifactRejectionReason::ReadFailed => {
+                        proto::ScheduledArtifactRejectionReason::ReadFailed
+                    }
+                    ScheduledArtifactRejectionReason::CandidateLimit => {
+                        proto::ScheduledArtifactRejectionReason::CandidateLimit
+                    }
+                } as i32,
+            })
+            .collect(),
     }
 }
 
@@ -226,6 +314,32 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     const PRIOR_FINAL: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    /// A cut walk retains its distinct reason and both completeness facts at the Cloud boundary.
+    #[test]
+    fn truncated_artifact_manifest_keeps_its_completeness() {
+        let declaration = ScheduledArtifactManifest {
+            items: Vec::new(),
+            rejections: vec![ScheduledArtifactRejection {
+                display_name: ".ora-scheduled-artifacts".to_owned(),
+                reason: ScheduledArtifactRejectionReason::CandidateLimit,
+            }],
+            omitted_rejections: 448,
+            walk_truncated: true,
+        };
+        assert_eq!(
+            manifest(&declaration),
+            proto::ScheduledArtifactManifest {
+                items: Vec::new(),
+                rejections: vec![proto::ScheduledArtifactRejection {
+                    display_name: ".ora-scheduled-artifacts".to_owned(),
+                    reason: proto::ScheduledArtifactRejectionReason::CandidateLimit as i32,
+                }],
+                omitted_rejections: 448,
+                walk_truncated: true,
+            }
+        );
+    }
     const PRIOR_BASE: &str = "0123456789abcdef0123456789abcdef01234567";
     const REPOSITORY: &str = "https://git.ora.test/6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.git";
     const DELIVERY_REF: &str = "refs/ora/deliveries/revision-1";
@@ -241,6 +355,8 @@ mod tests {
                 spec: Some(proto::execution_input::Spec::AgentSession(
                     proto::AgentSessionSpec {
                         agent_configuration: None,
+                        // A manual IssueRun carries no scheduled trigger.
+                        trigger: 0,
                         model_binding_id: String::new(),
                         agent_plugin_id: "official/ora-space.echo".into(),
                         agent_plugin_version: "1.2.3".into(),
@@ -403,5 +519,102 @@ mod tests {
         ] {
             assert!(matches!(prior(change), Err(Error::Validation(_))));
         }
+    }
+
+    /// A scheduled occurrence reaches the Node as one, and an unknown admission is refused rather
+    /// than run as a manual session that would never report its business result.
+    #[test]
+    fn scheduled_admission_crosses_only_when_cloud_says_so() {
+        let mut scheduled = resumed();
+        edit(&mut scheduled, |spec| {
+            spec.trigger = proto::AgentSessionTrigger::Scheduled as i32
+        });
+        assert_eq!(
+            start(&scheduled, &NodeId::new("node"))
+                .unwrap()
+                .payload
+                .spec
+                .trigger,
+            Some(SessionTrigger::Scheduled)
+        );
+
+        let manual = resumed();
+        assert_eq!(
+            start(&manual, &NodeId::new("node"))
+                .unwrap()
+                .payload
+                .spec
+                .trigger,
+            None
+        );
+
+        let mut unknown = resumed();
+        edit(&mut unknown, |spec| spec.trigger = 99);
+        assert!(matches!(
+            start(&unknown, &NodeId::new("node")),
+            Err(Error::Conflict)
+        ));
+    }
+
+    /// The executor's business facts reach Cloud exactly as it reported them.
+    #[test]
+    fn scheduled_results_carry_the_reported_facts() {
+        let ended = AgentSessionResult::AgentSessionEnded(AgentSessionEnded {
+            node: NodeRuntimeIdentity {
+                node_id: NodeId::new("node"),
+                incarnation_id: NodeIncarnationId::new("incarnation"),
+            },
+            reason: AgentSessionEndReason::IdleTimeout,
+            detail: None,
+            scheduled_result: Some(ScheduledRunResult {
+                verdict: ScheduledVerdict::RangeUnresolved,
+                verdict_detail: Some("no comparison base".to_owned()),
+            }),
+            artifact_manifest: Some(ScheduledArtifactManifest {
+                items: vec![ScheduledArtifactItem {
+                    index: 0,
+                    display_name: "reports/review.md".to_owned(),
+                    kind: ScheduledArtifactKind::Markdown,
+                    size_bytes: 5,
+                    sha256: "ab".repeat(32),
+                }],
+                rejections: vec![ScheduledArtifactRejection {
+                    display_name: "notes.pdf".to_owned(),
+                    reason: ScheduledArtifactRejectionReason::UnsupportedType,
+                }],
+                omitted_rejections: 448,
+                walk_truncated: true,
+            }),
+        });
+        let Some(proto::execution_result::Outcome::AgentSessionEnded(mapped)) =
+            result(&ended).outcome
+        else {
+            panic!("a session result must map to a session outcome")
+        };
+        assert_eq!(
+            mapped.scheduled_result,
+            Some(proto::ScheduledRunResult {
+                verdict: proto::ScheduledVerdict::RangeUnresolved as i32,
+                verdict_detail: Some("no comparison base".to_owned()),
+            })
+        );
+        assert_eq!(
+            mapped.artifact_manifest,
+            Some(proto::ScheduledArtifactManifest {
+                omitted_rejections: 448,
+                walk_truncated: true,
+                items: vec![proto::ScheduledArtifactItem {
+                    index: 0,
+                    display_name: "reports/review.md".to_owned(),
+                    kind: proto::ScheduledArtifactKind::Markdown as i32,
+                    size_bytes: 5,
+                    sha256: "ab".repeat(32),
+                }],
+                rejections: vec![proto::ScheduledArtifactRejection {
+                    display_name: "notes.pdf".to_owned(),
+                    reason: proto::ScheduledArtifactRejectionReason::UnsupportedType as i32,
+                }],
+            })
+        );
     }
 }

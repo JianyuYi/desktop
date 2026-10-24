@@ -416,3 +416,116 @@ fn node_identity_close_is_a_mismatch() {
             });
     });
 }
+
+/// A grant Cloud will not issue is answered, not swallowed: the Node is told that this upload can
+/// never be granted again, so it settles the artifacts it already stored instead of waiting.
+#[test]
+fn a_refused_scheduled_artifact_grant_reaches_the_node() {
+    const DIGEST: &str = "abababababababababababababababababababababababababababababababab";
+    ora_logging::with_trace_logging(|| {
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(/*mode*/ 0o700))
+            .tempdir_in(std::env::var_os("HOME").unwrap())
+            .unwrap();
+        let store =
+            SqliteStore::open(&root.path().join("controller"), ControllerId::new("owner")).unwrap();
+        fs::create_dir(root.path().join("node")).unwrap();
+        let socket = root.path().join("node").join("control.sock");
+        let target = NodeTarget {
+            node_id: NodeId::new("node"),
+            endpoint: NodeEndpoint::Ipc {
+                path: socket.clone(),
+            },
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let listener = UnixListener::bind(&socket).unwrap();
+                let settings = SessionConfig {
+                    io_timeout_ms: 1000,
+                    query_interval_ms: 20,
+                };
+                let session = run_session(&store, &target, &settings);
+                let upload = OperationId::new("upload-op");
+                let execution = ExecutionId::new("upload-execution");
+                let peer = async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    assert!(matches!(
+                        read_controller_message(&mut stream).await.unwrap(),
+                        Some(ControllerToNodeMessage::Hello(_))
+                    ));
+                    let identity = NodeRuntimeIdentity {
+                        node_id: target.node_id.clone(),
+                        incarnation_id: NodeIncarnationId::new("current"),
+                    };
+                    write_node_message(
+                        &mut stream,
+                        &NodeToControllerMessage::HelloAccepted(HelloAcceptedMessage {
+                            protocol_version: CURRENT_PROTOCOL_VERSION,
+                            payload: HelloAccepted {
+                                model_adapter: None,
+                                thread_previews: false,
+                                selected_version: CURRENT_PROTOCOL_VERSION,
+                                node: identity.clone(),
+                                capabilities: vec![
+                                    NodeCapability::RepositoryClone,
+                                    NodeCapability::RevisionDelivery,
+                                ],
+                            },
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    write_node_message(
+                        &mut stream,
+                        &NodeToControllerMessage::ScheduledArtifactGrantNeeded(
+                            ScheduledArtifactGrantNeededMessage {
+                                protocol_version: CURRENT_PROTOCOL_VERSION,
+                                operation_id: upload.clone(),
+                                execution_id: execution.clone(),
+                                payload: ScheduledArtifactGrantNeeded {
+                                    node_id: identity.node_id.clone(),
+                                    artifacts: vec![ScheduledArtifactUpload {
+                                        index: 0,
+                                        size_bytes: 5,
+                                        sha256: Sha256Digest::new(DIGEST),
+                                    }],
+                                },
+                            },
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                    // This Controller's local store grants nothing, so Cloud's refusal is the only
+                    // answer the Node can act on.
+                    loop {
+                        let message = timeout(
+                            Duration::from_secs(/*secs*/ 2),
+                            read_controller_message(&mut stream),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                        match message {
+                            ControllerToNodeMessage::Heartbeat(_)
+                            | ControllerToNodeMessage::GetExecutionStatus(_) => continue,
+                            ControllerToNodeMessage::ScheduledArtifactGrantsRefused(refused) => {
+                                assert_eq!(refused.protocol_version, CURRENT_PROTOCOL_VERSION);
+                                assert_eq!(refused.operation_id, upload);
+                                assert_eq!(refused.execution_id, execution);
+                                break;
+                            }
+                            other => panic!("unexpected {other:?}"),
+                        }
+                    }
+                };
+                tokio::select! {
+                    _ = session => panic!("the session ended before the Node was answered"),
+                    _ = peer => {}
+                }
+            });
+    });
+}

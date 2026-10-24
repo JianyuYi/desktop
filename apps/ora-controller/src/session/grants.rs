@@ -27,6 +27,18 @@ pub(super) enum Request {
         operation: OperationId,
         execution: ExecutionId,
     },
+    /// The Node named the declared artifacts it still has to store, by declaration index.
+    Artifacts {
+        operation: OperationId,
+        execution: ExecutionId,
+        artifacts: Vec<ScheduledArtifactUpload>,
+    },
+}
+
+/// One coalesced request, kept until Cloud can serve it.
+enum PendingGrant {
+    Revisions(GrantRequest),
+    Artifacts(Vec<ScheduledArtifactUpload>),
 }
 
 /// One bounded worker per connection when the Node advertises Revision delivery.
@@ -67,7 +79,7 @@ async fn run<S: CoordinationStore>(
     output: mpsc::Sender<ControllerToNodeMessage>,
 ) -> Result<(), Error> {
     let mut seen = HashSet::new();
-    let mut pending: HashMap<ExecutionId, (OperationId, GrantRequest)> = HashMap::new();
+    let mut pending: HashMap<ExecutionId, (OperationId, PendingGrant)> = HashMap::new();
     loop {
         if pending.is_empty() {
             let Some(request) = input.recv().await else {
@@ -79,28 +91,70 @@ async fn run<S: CoordinationStore>(
             accept(&mut seen, &mut pending, request);
         }
         for (execution, (operation, request)) in std::mem::take(&mut pending) {
-            match store
-                .grant_upload(&node, &operation, &execution, request.clone())
-                .await
-            {
-                Ok(GrantOutcome::Issued(message)) => {
-                    let count = message.payload.grants.len();
-                    if output
-                        .send(ControllerToNodeMessage::UploadGrant(message))
-                        .await
-                        .is_err()
-                    {
+            let artifacts = matches!(&request, PendingGrant::Artifacts(_));
+            let relayed = match &request {
+                PendingGrant::Revisions(request) => store
+                    .grant_upload(&node, &operation, &execution, request.clone())
+                    .await
+                    .map(|outcome| match outcome {
+                        GrantOutcome::Issued(message) => {
+                            Some(ControllerToNodeMessage::UploadGrant(message))
+                        }
+                        GrantOutcome::NotGrantable | GrantOutcome::AwaitNode => None,
+                    }),
+                PendingGrant::Artifacts(artifacts) => store
+                    .grant_scheduled_artifacts(&node, &operation, &execution, artifacts.clone())
+                    .await
+                    .map(|outcome| match outcome {
+                        ArtifactGrantOutcome::Issued(message) => {
+                            Some(ControllerToNodeMessage::ScheduledArtifactGrants(message))
+                        }
+                        ArtifactGrantOutcome::NotGrantable => None,
+                    }),
+            };
+            match relayed {
+                Ok(Some(message)) => {
+                    if output.send(message).await.is_err() {
                         return Ok(());
                     }
-                    ora_logging::ora_info!(execution_id = %execution.as_str(), grants = count, "upload grants relayed to the Node");
+                    ora_logging::ora_info!(execution_id = %execution.as_str(), "upload grants relayed to the Node");
                 }
-                Ok(GrantOutcome::NotGrantable) => {
+                // Cloud's refusal is final for this execution, so an upload must hear it: waiting
+                // for a grant that can never be issued would hold the Node's upload slot open.
+                Ok(None) if artifacts => {
+                    ora_logging::ora_info!(execution_id = %execution.as_str(), "Cloud withdrew this upload's grants; the Node settles what it stored");
+                    let refused = ControllerToNodeMessage::ScheduledArtifactGrantsRefused(
+                        ScheduledArtifactGrantsRefusedMessage {
+                            protocol_version: CURRENT_PROTOCOL_VERSION,
+                            operation_id: operation,
+                            execution_id: execution,
+                        },
+                    );
+                    if output.send(refused).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
                     ora_logging::ora_info!(execution_id = %execution.as_str(), "delivery is no longer grantable; Cloud settles its run");
                 }
-                Ok(GrantOutcome::AwaitNode) => {}
                 // Nothing was issued; the same request is served once Cloud or the lease is back.
                 Err(Error::Unavailable(_) | Error::Unknown(_) | Error::StaleEligibility) => {
                     pending.entry(execution).or_insert((operation, request));
+                }
+                // Every other failure is deterministic: repeating it cannot produce a grant, so the
+                // upload is told to settle instead of retrying into the same answer.
+                Err(error) if artifacts => {
+                    ora_logging::ora_warn!(execution_id = %execution.as_str(), error = %error, "scheduled-artifact grants cannot be issued; the Node settles what it stored");
+                    let refused = ControllerToNodeMessage::ScheduledArtifactGrantsRefused(
+                        ScheduledArtifactGrantsRefusedMessage {
+                            protocol_version: CURRENT_PROTOCOL_VERSION,
+                            operation_id: operation,
+                            execution_id: execution,
+                        },
+                    );
+                    if output.send(refused).await.is_err() {
+                        return Ok(());
+                    }
                 }
                 Err(error) => {
                     ora_logging::ora_warn!(execution_id = %execution.as_str(), error = %error, "upload grants could not be relayed; the Node asks again");
@@ -123,7 +177,7 @@ async fn run<S: CoordinationStore>(
 /// only the first time this connection sees the execution, so polling does not refresh grants.
 fn accept(
     seen: &mut HashSet<ExecutionId>,
-    pending: &mut HashMap<ExecutionId, (OperationId, GrantRequest)>,
+    pending: &mut HashMap<ExecutionId, (OperationId, PendingGrant)>,
     request: Request,
 ) {
     match request {
@@ -133,7 +187,13 @@ fn accept(
             checksums,
         } => {
             seen.insert(execution.clone());
-            pending.insert(execution, (operation, GrantRequest::Needed(checksums)));
+            pending.insert(
+                execution,
+                (
+                    operation,
+                    PendingGrant::Revisions(GrantRequest::Needed(checksums)),
+                ),
+            );
         }
         Request::Running {
             operation,
@@ -142,8 +202,16 @@ fn accept(
             if seen.insert(execution.clone()) {
                 pending
                     .entry(execution)
-                    .or_insert((operation, GrantRequest::Resumed));
+                    .or_insert((operation, PendingGrant::Revisions(GrantRequest::Resumed)));
             }
+        }
+        Request::Artifacts {
+            operation,
+            execution,
+            artifacts,
+        } => {
+            seen.insert(execution.clone());
+            pending.insert(execution, (operation, PendingGrant::Artifacts(artifacts)));
         }
     }
 }

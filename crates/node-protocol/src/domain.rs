@@ -43,11 +43,14 @@ pub use revision::{
 };
 pub use revision_restore::{PriorRevision, PriorRevisionCommit};
 pub use scheduled_run::{
-    MAX_SCHEDULED_ARTIFACT_BYTES, MAX_SCHEDULED_ARTIFACT_REJECTION_NAME_BYTES,
-    MAX_SCHEDULED_ARTIFACT_REJECTIONS, MAX_SCHEDULED_ARTIFACT_TOTAL_BYTES,
-    MAX_SCHEDULED_ARTIFACTS_PER_RUN, MAX_SCHEDULED_VERDICT_DETAIL_CHARS,
-    SCHEDULED_ARTIFACT_DIRECTORY, ScheduledArtifactItem, ScheduledArtifactKind,
-    ScheduledArtifactManifest, ScheduledArtifactRejection, ScheduledArtifactRejectionReason,
-    ScheduledRunResult, ScheduledVerdict, SessionTrigger,
+    DeliverScheduledArtifactsSpec, MAX_SCHEDULED_ARTIFACT_BYTES,
+    MAX_SCHEDULED_ARTIFACT_REJECTION_NAME_BYTES, MAX_SCHEDULED_ARTIFACT_REJECTIONS,
+    MAX_SCHEDULED_ARTIFACT_TOTAL_BYTES, MAX_SCHEDULED_ARTIFACTS_PER_RUN,
+    MAX_SCHEDULED_VERDICT_DETAIL_CHARS, SCHEDULED_ARTIFACT_DIRECTORY, ScheduledArtifactItem,
+    ScheduledArtifactKind, ScheduledArtifactManifest, ScheduledArtifactRejection,
+    ScheduledArtifactRejectionReason, ScheduledArtifactUpload, ScheduledArtifactUploadGrant,
+    ScheduledArtifactsDelivered, ScheduledArtifactsEvidence, ScheduledArtifactsExecutionResult,
+    ScheduledArtifactsFailed, ScheduledArtifactsFailureReason, ScheduledRunResult,
+    ScheduledVerdict, SessionTrigger,
 };
 pub use worktree::*;

@@ -111,6 +111,10 @@ pub struct AgentSessionSpec {
     /// Exact non-secret configuration frozen at run admission; authority is acquired over mTLS.
     #[prost(message, optional, tag="9")]
     pub agent_configuration: ::core::option::Option<AgentModelConfiguration>,
+    /// What admitted this session. Unspecified for a manual IssueRun, which is the shape every session
+    /// released before Cloud admitted scheduled occurrences already has.
+    #[prost(enumeration="AgentSessionTrigger", tag="10")]
+    pub trigger: i32,
 }
 /// Versioned adapter identity, never a runtime token or upstream credential.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -153,13 +157,71 @@ pub struct AgentBoundModel {
 }
 /// The only terminal result of a session execution. It is taken over only after every Thread event
 /// before it, so the Thread's last entry lands before the session is known to have ended.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AgentSessionEnded {
     #[prost(enumeration="AgentSessionEndReason", tag="1")]
     pub reason: i32,
     /// Bounded code such as `agent_plugin_unavailable`; never raw Agent output.
     #[prost(string, optional, tag="2")]
     pub detail: ::core::option::Option<::prost::alloc::string::String>,
+    /// The business result the executor parsed out of the run's final Assistant turn. Set only for a
+    /// scheduled session that ended normally: Cloud verifies the values but never parses the Thread.
+    #[prost(message, optional, tag="3")]
+    pub scheduled_result: ::core::option::Option<ScheduledRunResult>,
+    /// What the scheduled run declared under its reserved artifact directory, before the Workspace was
+    /// released. Accepted and rejected candidates are both visible, so a refusal is never silent.
+    #[prost(message, optional, tag="4")]
+    pub artifact_manifest: ::core::option::Option<ScheduledArtifactManifest>,
+}
+/// The business conclusion of one scheduled run, independent of the execution-layer result: a
+/// completed run may report FAIL, and neither value is ever derived from the other.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledRunResult {
+    #[prost(enumeration="ScheduledVerdict", tag="1")]
+    pub verdict: i32,
+    /// Free text the agent attached to its verdict, at most 2000 characters; never a second
+    /// machine-readable channel.
+    #[prost(string, optional, tag="2")]
+    pub verdict_detail: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// One artifact the run declared and Cloud grants a single object for. `index` identifies it in the
+/// upload grant and registration; it is never part of an object key.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledArtifactItem {
+    #[prost(uint32, tag="1")]
+    pub index: u32,
+    /// Forward-slash path relative to the reserved directory; for display only.
+    #[prost(string, tag="2")]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(enumeration="ScheduledArtifactKind", tag="3")]
+    pub kind: i32,
+    #[prost(uint64, tag="4")]
+    pub size_bytes: u64,
+    /// Lowercase hexadecimal SHA-256 the executor measured while collecting the file.
+    #[prost(string, tag="5")]
+    pub sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledArtifactRejection {
+    /// The candidate's relative path, or the reserved directory itself when it was refused whole.
+    #[prost(string, tag="1")]
+    pub display_name: ::prost::alloc::string::String,
+    #[prost(enumeration="ScheduledArtifactRejectionReason", tag="2")]
+    pub reason: i32,
+}
+/// Everything one scheduled run declared about its artifacts, in one message.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScheduledArtifactManifest {
+    #[prost(message, repeated, tag="1")]
+    pub items: ::prost::alloc::vec::Vec<ScheduledArtifactItem>,
+    #[prost(message, repeated, tag="2")]
+    pub rejections: ::prost::alloc::vec::Vec<ScheduledArtifactRejection>,
+    /// Refused candidates whose details did not fit in the bounded rejection list.
+    #[prost(uint32, tag="3")]
+    pub omitted_rejections: u32,
+    /// The walk stopped at its candidate budget; an unknown number was never examined.
+    #[prost(bool, tag="4")]
+    pub walk_truncated: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DeliverRevisionSpec {
@@ -235,6 +297,27 @@ pub struct RevisionFailed {
     #[prost(enumeration="RevisionFailureReason", tag="1")]
     pub reason: i32,
 }
+/// Uploads the artifacts one scheduled session declared. Cloud registers this work item in the same
+/// transaction that persists the declaration, and freezes the run's delivery deadline there.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeliverScheduledArtifactsSpec {
+    /// The ended session execution whose declaration Cloud persisted and whose checkout still holds the
+    /// reserved directory. Cloud chooses every object key; the Node never picks a location.
+    #[prost(string, tag="1")]
+    pub session_execution_id: ::prost::alloc::string::String,
+}
+/// Per-artifact facts the Node measured, one per declared item it uploaded. Cloud verifies each
+/// against the declaration before registering it and is the only writer of the index.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ScheduledArtifactsDelivered {
+    #[prost(message, repeated, tag="1")]
+    pub artifacts: ::prost::alloc::vec::Vec<StoredObject>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledArtifactsFailed {
+    #[prost(enumeration="ScheduledArtifactsFailureReason", tag="1")]
+    pub reason: i32,
+}
 /// A presigned single-object upload. It is a short-lived bearer credential: Cloud, the Controller
 /// and the Node keep it in memory only and never log it.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -254,6 +337,34 @@ pub struct UploadGrant {
     pub headers: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
     #[prost(message, optional, tag="5")]
     pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// What admitted an Agent session. Only a scheduled occurrence may report a business verdict or run
+/// artifacts; a manual IssueRun leaves it unspecified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum AgentSessionTrigger {
+    Unspecified = 0,
+    Scheduled = 1,
+}
+impl AgentSessionTrigger {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "AGENT_SESSION_TRIGGER_UNSPECIFIED",
+            Self::Scheduled => "AGENT_SESSION_TRIGGER_SCHEDULED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "AGENT_SESSION_TRIGGER_UNSPECIFIED" => Some(Self::Unspecified),
+            "AGENT_SESSION_TRIGGER_SCHEDULED" => Some(Self::Scheduled),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -291,6 +402,143 @@ impl AgentSessionEndReason {
             "AGENT_SESSION_END_REASON_CANCELLED" => Some(Self::Cancelled),
             "AGENT_SESSION_END_REASON_AGENT_FAILED" => Some(Self::AgentFailed),
             "AGENT_SESSION_END_REASON_INTERRUPTED" => Some(Self::Interrupted),
+            _ => None,
+        }
+    }
+}
+/// The frozen business verdict vocabulary Cloud shares with local scheduled runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledVerdict {
+    Unspecified = 0,
+    Pass = 1,
+    Warn = 2,
+    Fail = 3,
+    Blocked = 4,
+    Idle = 5,
+    RangeUnresolved = 6,
+}
+impl ScheduledVerdict {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCHEDULED_VERDICT_UNSPECIFIED",
+            Self::Pass => "SCHEDULED_VERDICT_PASS",
+            Self::Warn => "SCHEDULED_VERDICT_WARN",
+            Self::Fail => "SCHEDULED_VERDICT_FAIL",
+            Self::Blocked => "SCHEDULED_VERDICT_BLOCKED",
+            Self::Idle => "SCHEDULED_VERDICT_IDLE",
+            Self::RangeUnresolved => "SCHEDULED_VERDICT_RANGE_UNRESOLVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_VERDICT_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCHEDULED_VERDICT_PASS" => Some(Self::Pass),
+            "SCHEDULED_VERDICT_WARN" => Some(Self::Warn),
+            "SCHEDULED_VERDICT_FAIL" => Some(Self::Fail),
+            "SCHEDULED_VERDICT_BLOCKED" => Some(Self::Blocked),
+            "SCHEDULED_VERDICT_IDLE" => Some(Self::Idle),
+            "SCHEDULED_VERDICT_RANGE_UNRESOLVED" => Some(Self::RangeUnresolved),
+            _ => None,
+        }
+    }
+}
+/// The closed set of artifact types a scheduled run may declare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledArtifactKind {
+    Unspecified = 0,
+    Markdown = 1,
+    Json = 2,
+    Text = 3,
+    Log = 4,
+    Xml = 5,
+    Html = 6,
+}
+impl ScheduledArtifactKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCHEDULED_ARTIFACT_KIND_UNSPECIFIED",
+            Self::Markdown => "SCHEDULED_ARTIFACT_KIND_MARKDOWN",
+            Self::Json => "SCHEDULED_ARTIFACT_KIND_JSON",
+            Self::Text => "SCHEDULED_ARTIFACT_KIND_TEXT",
+            Self::Log => "SCHEDULED_ARTIFACT_KIND_LOG",
+            Self::Xml => "SCHEDULED_ARTIFACT_KIND_XML",
+            Self::Html => "SCHEDULED_ARTIFACT_KIND_HTML",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_ARTIFACT_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCHEDULED_ARTIFACT_KIND_MARKDOWN" => Some(Self::Markdown),
+            "SCHEDULED_ARTIFACT_KIND_JSON" => Some(Self::Json),
+            "SCHEDULED_ARTIFACT_KIND_TEXT" => Some(Self::Text),
+            "SCHEDULED_ARTIFACT_KIND_LOG" => Some(Self::Log),
+            "SCHEDULED_ARTIFACT_KIND_XML" => Some(Self::Xml),
+            "SCHEDULED_ARTIFACT_KIND_HTML" => Some(Self::Html),
+            _ => None,
+        }
+    }
+}
+/// Why one candidate was refused instead of declared. Cloud records the rejection next to the
+/// artifacts that succeeded, so a refusal is visible to the reader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledArtifactRejectionReason {
+    Unspecified = 0,
+    UnsupportedType = 1,
+    PathUnsafe = 2,
+    Symlink = 3,
+    HardLink = 4,
+    TooLarge = 5,
+    TooMany = 6,
+    TotalTooLarge = 7,
+    ReadFailed = 8,
+    /// The bounded directory walk stopped before examining every candidate.
+    CandidateLimit = 9,
+}
+impl ScheduledArtifactRejectionReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCHEDULED_ARTIFACT_REJECTION_REASON_UNSPECIFIED",
+            Self::UnsupportedType => "SCHEDULED_ARTIFACT_REJECTION_REASON_UNSUPPORTED_TYPE",
+            Self::PathUnsafe => "SCHEDULED_ARTIFACT_REJECTION_REASON_PATH_UNSAFE",
+            Self::Symlink => "SCHEDULED_ARTIFACT_REJECTION_REASON_SYMLINK",
+            Self::HardLink => "SCHEDULED_ARTIFACT_REJECTION_REASON_HARD_LINK",
+            Self::TooLarge => "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_LARGE",
+            Self::TooMany => "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_MANY",
+            Self::TotalTooLarge => "SCHEDULED_ARTIFACT_REJECTION_REASON_TOTAL_TOO_LARGE",
+            Self::ReadFailed => "SCHEDULED_ARTIFACT_REJECTION_REASON_READ_FAILED",
+            Self::CandidateLimit => "SCHEDULED_ARTIFACT_REJECTION_REASON_CANDIDATE_LIMIT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_UNSUPPORTED_TYPE" => Some(Self::UnsupportedType),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_PATH_UNSAFE" => Some(Self::PathUnsafe),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_SYMLINK" => Some(Self::Symlink),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_HARD_LINK" => Some(Self::HardLink),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_LARGE" => Some(Self::TooLarge),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_TOO_MANY" => Some(Self::TooMany),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_TOTAL_TOO_LARGE" => Some(Self::TotalTooLarge),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_READ_FAILED" => Some(Self::ReadFailed),
+            "SCHEDULED_ARTIFACT_REJECTION_REASON_CANDIDATE_LIMIT" => Some(Self::CandidateLimit),
             _ => None,
         }
     }
@@ -341,6 +589,45 @@ impl RevisionFailureReason {
             "REVISION_FAILURE_REASON_VERIFICATION_FAILED" => Some(Self::VerificationFailed),
             "REVISION_FAILURE_REASON_PUSH_REJECTED" => Some(Self::PushRejected),
             "REVISION_FAILURE_REASON_PUSH_FAILED" => Some(Self::PushFailed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ScheduledArtifactsFailureReason {
+    Unspecified = 0,
+    /// The Node could not read the reserved directory it had declared.
+    WorkspaceUnavailable = 1,
+    /// An upload failed or was refused after the retries ran out.
+    UploadFailed = 2,
+    /// The Node has no persisted declaration for the session, for example after a restart.
+    DeclarationUnavailable = 3,
+    /// The attempt was terminated before it reached its own verdict; a new execution may retry.
+    Interrupted = 4,
+}
+impl ScheduledArtifactsFailureReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SCHEDULED_ARTIFACTS_FAILURE_REASON_UNSPECIFIED",
+            Self::WorkspaceUnavailable => "SCHEDULED_ARTIFACTS_FAILURE_REASON_WORKSPACE_UNAVAILABLE",
+            Self::UploadFailed => "SCHEDULED_ARTIFACTS_FAILURE_REASON_UPLOAD_FAILED",
+            Self::DeclarationUnavailable => "SCHEDULED_ARTIFACTS_FAILURE_REASON_DECLARATION_UNAVAILABLE",
+            Self::Interrupted => "SCHEDULED_ARTIFACTS_FAILURE_REASON_INTERRUPTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SCHEDULED_ARTIFACTS_FAILURE_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "SCHEDULED_ARTIFACTS_FAILURE_REASON_WORKSPACE_UNAVAILABLE" => Some(Self::WorkspaceUnavailable),
+            "SCHEDULED_ARTIFACTS_FAILURE_REASON_UPLOAD_FAILED" => Some(Self::UploadFailed),
+            "SCHEDULED_ARTIFACTS_FAILURE_REASON_DECLARATION_UNAVAILABLE" => Some(Self::DeclarationUnavailable),
+            "SCHEDULED_ARTIFACTS_FAILURE_REASON_INTERRUPTED" => Some(Self::Interrupted),
             _ => None,
         }
     }
@@ -567,7 +854,7 @@ pub struct CloneSpec {
 /// join the loop.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecutionInput {
-    #[prost(oneof="execution_input::Spec", tags="1, 2, 3, 4, 5")]
+    #[prost(oneof="execution_input::Spec", tags="1, 2, 3, 4, 5, 6")]
     pub spec: ::core::option::Option<execution_input::Spec>,
 }
 /// Nested message and enum types in `ExecutionInput`.
@@ -584,6 +871,8 @@ pub mod execution_input {
         AgentSession(super::AgentSessionSpec),
         #[prost(message, tag="5")]
         DeliverRevision(super::DeliverRevisionSpec),
+        #[prost(message, tag="6")]
+        DeliverScheduledArtifacts(super::DeliverScheduledArtifactsSpec),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -607,7 +896,7 @@ pub struct CloneFailed {
 pub struct ExecutionResult {
     #[prost(message, optional, tag="1")]
     pub node: ::core::option::Option<NodeIdentity>,
-    #[prost(oneof="execution_result::Outcome", tags="2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof="execution_result::Outcome", tags="2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub outcome: ::core::option::Option<execution_result::Outcome>,
 }
 /// Nested message and enum types in `ExecutionResult`.
@@ -630,6 +919,10 @@ pub mod execution_result {
         RevisionUnchanged(super::RevisionUnchanged),
         #[prost(message, tag="9")]
         RevisionFailed(super::RevisionFailed),
+        #[prost(message, tag="10")]
+        ScheduledArtifactsDelivered(super::ScheduledArtifactsDelivered),
+        #[prost(message, tag="11")]
+        ScheduledArtifactsFailed(super::ScheduledArtifactsFailed),
     }
 }
 /// The run Workspace sandbox a work item must be dispatched to, as of its current generation.
@@ -979,6 +1272,36 @@ pub struct GrantRevisionUploadRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GrantRevisionUploadResponse {
     /// Exactly one grant, for the input's history_key.
+    #[prost(message, repeated, tag="1")]
+    pub grants: ::prost::alloc::vec::Vec<UploadGrant>,
+}
+/// One declared artifact to upload, as the Node declared it. Cloud grants only indices it persisted
+/// for this run and binds the declared size and digest into the PUT signature.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ScheduledArtifactUpload {
+    #[prost(uint32, tag="1")]
+    pub index: u32,
+    #[prost(uint64, tag="2")]
+    pub size: u64,
+    /// Lowercase hexadecimal SHA-256.
+    #[prost(string, tag="3")]
+    pub sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantScheduledArtifactUploadRequest {
+    #[prost(int64, tag="1")]
+    pub epoch: i64,
+    /// A scheduled-artifact delivery execution registered through RecordDispatch.
+    #[prost(string, tag="2")]
+    pub execution_id: ::prost::alloc::string::String,
+    /// At most 64 declared artifacts. An index outside the run's persisted declaration, a size or digest
+    /// that differs from it, or one already registered fails with INVALID_ARGUMENT.
+    #[prost(message, repeated, tag="3")]
+    pub artifacts: ::prost::alloc::vec::Vec<ScheduledArtifactUpload>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GrantScheduledArtifactUploadResponse {
+    /// One grant per requested artifact, in the same order. The object key stays Cloud's choice.
     #[prost(message, repeated, tag="1")]
     pub grants: ::prost::alloc::vec::Vec<UploadGrant>,
 }

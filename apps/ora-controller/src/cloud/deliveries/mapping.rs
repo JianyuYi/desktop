@@ -179,6 +179,98 @@ pub(super) fn checksums(value: &BTreeMap<ObjectKey, Sha256Digest>) -> HashMap<St
         .collect()
 }
 
+/// Identifies only scheduled-artifact upload work; sessions and deliveries keep their families.
+pub(in crate::cloud) fn is_scheduled_artifacts(record: &proto::ExecutionRecord) -> bool {
+    matches!(
+        record.input.as_ref().and_then(|v| v.spec.as_ref()),
+        Some(proto::execution_input::Spec::DeliverScheduledArtifacts(_))
+    )
+}
+
+/// Reconstructs a recorded artifact upload. The declaration stays Cloud's: the Node reads it from
+/// its own terminal result, so the input repeats only the ended session's execution identity.
+pub(in crate::cloud) fn scheduled_artifacts(
+    record: &proto::ExecutionRecord,
+    node: &NodeId,
+) -> Result<DeliverScheduledArtifactsMessage, Error> {
+    if record.node_id != node.as_str() {
+        return Err(Error::Conflict);
+    }
+    let Some(proto::execution_input::Spec::DeliverScheduledArtifacts(spec)) =
+        record.input.as_ref().and_then(|v| v.spec.as_ref())
+    else {
+        return Err(Error::Conflict);
+    };
+    let command = DeliverScheduledArtifactsMessage {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        operation_id: OperationId::new(record.node_operation_id.clone()),
+        execution_id: ExecutionId::new(record.execution_id.clone()),
+        payload: DeliverScheduledArtifacts {
+            spec: DeliverScheduledArtifactsSpec {
+                session_execution_id: ExecutionId::new(spec.session_execution_id.clone()),
+            },
+        },
+    };
+    // An input the Node protocol refuses is a disagreement with the authority, not a retry.
+    command.validate()?;
+    Ok(command)
+}
+
+/// A failure carries nothing to compare, and a delivered object's key is Cloud's own choice, so the
+/// input cannot check it. Cloud verifies every size and digest against the declaration it persisted.
+pub(super) fn accepts_scheduled_artifacts(result: &ScheduledArtifactsExecutionResult) -> bool {
+    match result {
+        ScheduledArtifactsExecutionResult::Delivered(delivered) => {
+            delivered.artifacts.len() <= MAX_SCHEDULED_ARTIFACTS_PER_RUN
+        }
+        ScheduledArtifactsExecutionResult::Failed(_) => true,
+    }
+}
+
+/// Projects the terminal upload onto the contract, preserving the producing incarnation. Cloud does
+/// not accept a declared object on this event alone: it verifies the stored bytes itself.
+pub(super) fn scheduled_artifacts_result(
+    session: &NodeRuntimeIdentity,
+    value: &ScheduledArtifactsExecutionResult,
+) -> proto::ExecutionResult {
+    let outcome = match value {
+        ScheduledArtifactsExecutionResult::Delivered(delivered) => {
+            proto::execution_result::Outcome::ScheduledArtifactsDelivered(
+                proto::ScheduledArtifactsDelivered {
+                    artifacts: delivered.artifacts.iter().map(stored).collect(),
+                },
+            )
+        }
+        ScheduledArtifactsExecutionResult::Failed(failed) => {
+            proto::execution_result::Outcome::ScheduledArtifactsFailed(
+                proto::ScheduledArtifactsFailed {
+                    reason: match failed.reason {
+                        ScheduledArtifactsFailureReason::WorkspaceUnavailable => {
+                            proto::ScheduledArtifactsFailureReason::WorkspaceUnavailable
+                        }
+                        ScheduledArtifactsFailureReason::UploadFailed => {
+                            proto::ScheduledArtifactsFailureReason::UploadFailed
+                        }
+                        ScheduledArtifactsFailureReason::DeclarationUnavailable => {
+                            proto::ScheduledArtifactsFailureReason::DeclarationUnavailable
+                        }
+                        ScheduledArtifactsFailureReason::Interrupted => {
+                            proto::ScheduledArtifactsFailureReason::Interrupted
+                        }
+                    } as i32,
+                },
+            )
+        }
+    };
+    proto::ExecutionResult {
+        node: Some(proto::NodeIdentity {
+            node_id: session.node_id.as_str().into(),
+            node_incarnation_id: session.incarnation_id.as_str().into(),
+        }),
+        outcome: Some(outcome),
+    }
+}
+
 /// Hands Cloud's grants to the Node unchanged: headers verbatim (the signed `If-None-Match: *` and
 /// checksum header included) and the same expiry. Only grants for requested keys are accepted, so
 /// Cloud can never redirect an upload to another object.
@@ -209,6 +301,48 @@ pub(super) fn grants(
         operation_id: command.operation_id.clone(),
         execution_id: command.execution_id.clone(),
         payload: UploadGrant { grants },
+    };
+    message.validate()?;
+    Ok(message)
+}
+
+/// Hands Cloud's artifact grants to the Node, pairing each with the declaration index requested at
+/// the same position. Cloud answers one grant per requested artifact in that order and chooses the
+/// object key itself, so the Node only ever uploads to the key the grant names.
+pub(super) fn artifact_grants(
+    response: proto::GrantScheduledArtifactUploadResponse,
+    operation: &OperationId,
+    execution: &ExecutionId,
+    requested: &[ScheduledArtifactUpload],
+) -> Result<ScheduledArtifactGrantsMessage, Error> {
+    if response.grants.len() != requested.len() {
+        return Err(Error::Conflict);
+    }
+    let grants = response
+        .grants
+        .into_iter()
+        .zip(requested)
+        .map(|(grant, artifact)| {
+            if grant.method != "PUT" {
+                return Err(Error::Conflict);
+            }
+            Ok(ScheduledArtifactUploadGrant {
+                index: artifact.index,
+                grant: ObjectUploadGrant {
+                    object_key: ObjectKey::new(grant.object_key),
+                    url: PresignedUrl::new(grant.url),
+                    method: UploadMethod::Put,
+                    headers: grant.headers.into_iter().collect(),
+                    expires_at: super::super::mapping::expiry(grant.expires_at)?,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let message = ScheduledArtifactGrantsMessage {
+        protocol_version: CURRENT_PROTOCOL_VERSION,
+        operation_id: operation.clone(),
+        execution_id: execution.clone(),
+        payload: ScheduledArtifactGrants { grants },
     };
     message.validate()?;
     Ok(message)

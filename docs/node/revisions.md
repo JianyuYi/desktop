@@ -86,6 +86,46 @@ The terminal `revision_result` (sequence 1) is replayed until acknowledged; the 
 once it is durable and leftovers are swept at the next start. Shutdown, Controller disconnection and
 cancellation never write a failure; the delivery resumes from its frozen plan after restart.
 
+## Scheduled-artifact uploads
+
+A scheduled run declares its artifacts under `.ora-scheduled-artifacts/`, and Cloud stores that
+declaration without ever seeing the Workspace. `deliver_scheduled_artifacts` is therefore its own
+execution, run after the session ends and before the Workspace can be released:
+
+- `controlled_deliver_scheduled_artifacts` is the production entry: its runtime permit must match this
+  Node, incarnation, operation and execution, checked at admission like every other work kind. The
+  input names only the ended session; the Node reads the declaration back from that session's stored
+  terminal result, so a resent execution cannot choose a different set of files.
+- A missing declaration fails as `declaration_unavailable`; a checkout or reserved directory that
+  cannot be read fails as `workspace_unavailable`.
+- Cloud owns every object key. The Node asks for grants by declaration index with the declared size
+  and digest (`scheduled_artifact_grant_needed`), and Cloud answers one grant per requested artifact in
+  the same order (`scheduled_artifact_grants`). Grants live only in memory. Each grant is applied to
+  the declaration index it was signed for and any index the upload no longer has outstanding is
+  ignored, so a reply crossing a retry or a repeated request cannot fail the exchange.
+- Cloud can withdraw an upload's grants for good (`scheduled_artifact_grants_refused`): the run left
+  `delivering`, its frozen window has no usable grant left, or no object store is configured. That
+  answer cannot change for the execution, so the upload stops asking and settles what it stored
+  instead of holding its slot open.
+- The Controller dispatches this execution only to a Node that advertises `RevisionDelivery`, because
+  it reuses that delivery's memory-only grant relay; the gate is deliberate rather than a missing
+  capability.
+- This upload may run next to the Revision delivery of the same run, because Cloud dispatches both
+  once the session ended. The Node keeps a session exclusive with every run execution and each
+  delivery family exclusive with itself, so a second Revision delivery or a second upload is still
+  refused with `resource_conflict`.
+- Each file is measured again and uploaded to the key its grant names; 2xx and 412 count as stored. A
+  measured size or digest that no longer matches the declaration fails that artifact before any PUT,
+  because Cloud signed the declared values into the grant. A failed artifact does not stop the
+  others. When any artifact was stored, the terminal result reports that subset as delivered so Cloud
+  can register successes and record the remaining refusals. Only an attempt that stored nothing ends
+  as `failed{upload_failed}`. Empty files use the same measured size/checksum and grant path. The
+  Controller preserves the manifest's omitted-refusal count, walk-truncation flag and
+  `candidate_limit` reason when forwarding the session terminal result.
+- The terminal `scheduled_artifacts_result` (sequence 1) is replayed until acknowledged and shares the
+  delivery outbox. A restart reports the attempt it cannot resume as `failed{interrupted}`; Cloud
+  receives that original terminal fact and settles the run's delivery against its frozen deadline.
+
 ## Restoring a prior Revision
 
 A session with `prior_revision` (its identity, final and base commits, `git_repository_url` and

@@ -67,6 +67,34 @@ Git Server 的暂时性失败最多尝试三次，间隔 5 秒和 30 秒；401�
 终态 `revision_result`（序号 1）会重放直到被确认；它持久化后冻结的文件即被删除，残留在下次启动时清扫。关闭、Controller
 断开和取消从不写入失败；重启后交付从冻结计划继续。
 
+## 定时产物上传
+
+定时运行在 `.ora-scheduled-artifacts/` 下声明产物，Cloud 只保存声明，从不查看 Workspace。因此
+`deliver_scheduled_artifacts` 是一个独立执行，在会话结束之后、Workspace 被释放之前运行：
+
+- 生产入口是 `controlled_deliver_scheduled_artifacts`：运行许可必须精确匹配本 Node、incarnation、operation 和
+  execution，与其他工作类型一样在受理时校验。输入只命名已结束的会话；Node 从该会话已存储的终态结果读回声明，
+  所以重发的执行无法换用另一组文件。
+- 没有声明时以 `declaration_unavailable` 失败；checkout 或保留目录不可读时以 `workspace_unavailable` 失败。
+- 对象键全部由 Cloud 决定。Node 按声明 index 连同声明的大小和摘要请求授权
+  （`scheduled_artifact_grant_needed`），Cloud 按请求顺序为每个产物返回一个授权
+  （`scheduled_artifact_grants`）。授权只存在于内存。每个授权只用于它签发的那个声明 index，上传已不再需要的 index
+  一律忽略，所以跨越重试或重复请求的应答不会让整条交换失败。
+- Cloud 可以永久收回某个上传的授权（`scheduled_artifact_grants_refused`）：运行已离开 `delivering`、冻结窗口内已
+  签不出可用授权，或没有配置对象存储。这些状态对该执行不会再改变，所以上传停止请求，按已存下的对象结算，而不是
+  一直占着槽位等下去。
+- Controller 只把该执行派发给声明 `RevisionDelivery` 的 Node，因为它复用该交付的内存授权中继；这个门控
+  是有意为之，而不是缺少独立能力。
+- 该上传可以与同一运行的 Revision 交付同时进行，因为会话结束后 Cloud 会派发两者。Node 仍让会话独占所有运行执行、
+  让每个交付族自斥，所以第二次 Revision 交付或第二个上传仍以 `resource_conflict` 拒绝。
+- 每个文件重新测量后上传到其授权指定的对象键；2xx 和 412 都算已存储。测量出的大小或摘要与声明不一致时，该产物
+  在发出任何 PUT 之前就失败，因为 Cloud 已把声明值签进授权。单个产物失败不会阻止其余产物；只要有文件
+  已存储，终态就按 delivered 上报这个子集，让 Cloud 逐项登记成功、记录其余拒绝。一个文件都未存下时才以
+  `failed{upload_failed}` 结束。空文件使用相同的大小、摘要和授权路径。Controller 转交会话终态时完整保留清单的
+  未列明拒绝数、遍历截断标记和 `candidate_limit` 原因。
+- 终态 `scheduled_artifacts_result`（序号 1）会重放直到被确认，并共用交付的 outbox。重启后无法续传的尝试以
+  `failed{interrupted}` 上报；Cloud 接管这份原终态，按运行冻结的交付截止结算。
+
 ## 恢复上一个 Revision
 
 带 `prior_revision`（其身份、最终提交与基础提交、`git_repository_url` 和 `delivery_ref`）的会话，在定位 checkout 并检查
