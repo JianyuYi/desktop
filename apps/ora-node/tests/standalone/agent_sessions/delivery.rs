@@ -12,7 +12,7 @@ const HISTORY_KEY: &str = "runs/e2e/history.jsonl";
 const SIGNATURE: &str = "X-Amz-Signature=e2e-bearer-credential";
 
 /// Stores every PUT body by key and answers 201.
-async fn object_store() -> (String, Arc<Mutex<BTreeMap<String, Vec<u8>>>>) {
+pub(super) async fn object_store() -> (String, Arc<Mutex<BTreeMap<String, Vec<u8>>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let objects = Arc::new(Mutex::new(BTreeMap::new()));
@@ -82,7 +82,7 @@ async fn next(stream: &mut tokio::net::UnixStream) -> NodeToControllerMessage {
 }
 
 /// Delivers the session fixture's execution from its clone.
-fn deliver(base: &CommitId, server: &GitServerFixture) -> DeliverRevisionMessage {
+pub(super) fn deliver(base: &CommitId, server: &GitServerFixture) -> DeliverRevisionMessage {
     DeliverRevisionMessage {
         protocol_version: CURRENT_PROTOCOL_VERSION,
         operation_id: OperationId::new("deliver-operation"),

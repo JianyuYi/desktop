@@ -14,6 +14,8 @@ mod recovery;
 mod resume;
 #[path = "agent_sessions/support.rs"]
 mod support;
+#[path = "agent_sessions/unknown_delivery.rs"]
+mod unknown_delivery;
 #[path = "agent_sessions/window.rs"]
 mod window;
 use support::*;
