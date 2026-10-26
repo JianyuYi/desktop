@@ -62,7 +62,7 @@
 
 交互的 Agent 节点在第一个回合之后停下等待输入。后续消息作为人工回合在同一会话上运行，`completeWorkflowNode` 手动完成节点；一个完成认领防止后续回合与手动完成竞争。Iteration 区域的成员默认不是交互的，运行时拒绝交互成员。
 
-每个停靠回合都会写入完成快照：turn key、stop reason、blockers 和最终 assistant 文本的 digest。只有 `EndTurn` 且没有 blocker 的回合才能正常完成；停止、截断、拒答或未知终态会保持等待输入，`completeWorkflowNode` 返回 `workflow_node_incomplete`（带上全部 blocker），除非显式传 `force`；turn key 或 digest 变化分别返回 `workflow_node_turn_changed` / `workflow_node_output_changed`，并给出 expected 与 actual。会话末尾的步骤卡片是唯一的推进入口，提供继续或二次确认后的强制完成。
+每个停靠回合都会写入完成快照：turn key、stop reason、blockers 和最终 assistant 文本的 digest。只有 `EndTurn` 且没有 blocker 的回合才能正常完成；停止、截断、拒答或未知终态会保持等待输入，`completeWorkflowNode` 返回 `workflow_node_incomplete`（带上全部 blocker），除非显式传 `force`；turn key 或 digest 变化分别返回 `workflow_node_turn_changed` / `workflow_node_output_changed`，并给出 expected 与 actual。会话末尾的步骤卡片和右下角按钮是两个显式推进入口：继续、二次确认后的强制完成，或卡片 ready 时的完成并推进。
 
 如果流在 stop reason 持久化前被 drop，节点按最后一次可读历史写 provisional 快照：保留它描述的 `userSeq`，并带 `turn_not_settled` warning；之后完成时，只要同一 user 消息的回合已经收敛就修复该快照。升级前停靠、完全没有快照的节点由第一次完成尝试在读取会话历史后物化快照，再走同一套 blocker 门禁，所以未完成的回合同样会被拒绝，不会静默推进。
 

@@ -119,8 +119,9 @@ assistant-text digest. Only an `EndTurn` turn without blockers completes normall
 truncated, refused or unknown turn keeps the node awaiting input, and `completeWorkflowNode` rejects
 it with `workflow_node_incomplete` (carrying every blocker) unless `force` is requested; a changed
 turn or output digest returns `workflow_node_turn_changed` or `workflow_node_output_changed`, naming
-the expected and actual identity. The step card at the end of the conversation is the only advance
-action, offering continue or a confirmed forced completion.
+the expected and actual identity. The step card at the end of the conversation and the bottom-right
+action are the two explicit ways to advance: continue, a confirmed forced completion, or
+complete-and-advance when the card is ready.
 
 A turn whose stream dropped before its stop reason became durable parks provisionally from the last
 readable history: the snapshot keeps the `userSeq` it describes and a `turn_not_settled` warning, and

@@ -340,7 +340,8 @@ async fn park_first_interactive_turn(
     session_id: SessionId,
     output_contract: Option<AgentOutputContract>,
 ) -> Result<(), NodeExecutionError> {
-    tokio::task::spawn_blocking(move || {        let snapshot = match read_session_history(&sessions_root, session_id.as_ref()) {
+    tokio::task::spawn_blocking(move || {
+        let snapshot = match read_session_history(&sessions_root, session_id.as_ref()) {
             Ok(history) => derive_completion_snapshot(&history, output_contract.as_ref(), false),
             Err(error) => {
                 ora_warn!(
